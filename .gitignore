@@ -1,0 +1,29 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS / temp files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.temp
+~$*
+
+# Local data exports
+scoutintel_*_shortlist_*.csv

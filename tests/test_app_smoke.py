@@ -287,3 +287,62 @@ def test_upload_mode_without_file_shows_template() -> None:
     assert not at.exception
     assert any("Upload an FBref-style" in i.value for i in at.info)
     assert count(at, "download_button") == 1  # the CSV template
+
+
+# --------------------------------------------------------------------------- #
+# Real Data source
+# --------------------------------------------------------------------------- #
+REAL_SOURCE = "Real Data (2023-24 Top 5 European Leagues)"
+
+
+def _benchmark_frame() -> pd.DataFrame:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ingest_fbref_for_app_tests", Path(APP_PATH).parent / "scripts" / "ingest_fbref.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module.build_benchmark_dataset("2023-2024")
+
+
+def _real_source_app(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> AppTest:
+    import src.data.loader as loader_module
+
+    monkeypatch.setattr(loader_module, "PROCESSED_DATA_DIR", data_dir)
+    at = AppTest.from_file(APP_PATH, default_timeout=180)
+    at.run()
+    at.radio(key="source").set_value(REAL_SOURCE).run()
+    return at
+
+
+def test_real_source_without_data_shows_instructions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    at = _real_source_app(monkeypatch, tmp_path)
+    assert not at.exception
+    assert any("Real data has not been ingested yet" in i.value for i in at.info)
+    assert any("ingest_fbref.py" in i.value for i in at.info)
+
+
+def test_real_source_benchmark_is_flagged_as_synthetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _benchmark_frame().to_parquet(tmp_path / "benchmark_players_2023_2024.parquet", index=False)
+    at = _real_source_app(monkeypatch, tmp_path)
+    assert not at.exception and not at.error
+    assert any("Synthetic benchmark, not real players" in w.value for w in at.warning)
+    assert count(at, "image") == 5
+    # Contracts count from the 2023-24 season end, not the synthetic DB's 2026.
+    assert "2024" in (at.select_slider(key="contract_years").help or "")
+
+
+def test_real_source_with_fbref_file_shows_estimate_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data.real_data_enricher import CONTRACT_SOURCE_COLUMN, VALUE_SOURCE_COLUMN
+
+    frame = _benchmark_frame()
+    frame["Data_Origin"] = "fbref"  # real-format file (test fixture only)
+    frame[VALUE_SOURCE_COLUMN] = "proxy"
+    frame[CONTRACT_SOURCE_COLUMN] = "proxy"
+    frame.to_parquet(tmp_path / "real_players_2023_2024.parquet", index=False)
+    at = _real_source_app(monkeypatch, tmp_path)
+    assert not at.exception and not at.error
+    assert any("model estimates" in i.value for i in at.info)
+    assert not any("Synthetic benchmark" in w.value for w in at.warning)
+    assert count(at, "image") == 5

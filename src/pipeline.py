@@ -18,8 +18,10 @@ from src.config import (
     COMPOSITE_SCORES,
     CORE_FEATURES,
     CURRENT_SEASON_END_YEAR,
+    DATA_ORIGIN_COLUMN,
     FEATURE_LABELS,
     PERCENTILE_SUFFIX,
+    season_end_year,
 )
 from src.exceptions import InsufficientDataError
 from src.features.preprocessor import ScalerType, ScoutingPreprocessor
@@ -90,6 +92,37 @@ class RecruitmentFilters:
         if self.contract_years_max is not None:
             parts.append(f"Contract ≤ {self.contract_years_max} yr left")
         return " · ".join(parts) or "No constraints"
+
+
+# --------------------------------------------------------------------------- #
+# Dataset context
+# --------------------------------------------------------------------------- #
+def dataset_reference_year(df: pd.DataFrame) -> int:
+    """Season end year the data describes (contract years count from it).
+
+    Uses the most common ``Season`` value (e.g. ``"2023-2024"`` -> 2024) and
+    falls back to :data:`CURRENT_SEASON_END_YEAR` when absent or unparseable.
+    """
+    if "Season" not in df.columns or df["Season"].dropna().empty:
+        return CURRENT_SEASON_END_YEAR
+    try:
+        return season_end_year(str(df["Season"].dropna().mode().iloc[0]))
+    except ValueError:
+        return CURRENT_SEASON_END_YEAR
+
+
+def dataset_origin(df: pd.DataFrame) -> str | None:
+    """Provenance label (``"fbref"``, ``"synthetic-benchmark"``) if recorded."""
+    if DATA_ORIGIN_COLUMN not in df.columns or df[DATA_ORIGIN_COLUMN].dropna().empty:
+        return None
+    return str(df[DATA_ORIGIN_COLUMN].dropna().mode().iloc[0])
+
+
+def proxy_share(df: pd.DataFrame, column: str) -> float:
+    """Fraction of rows whose ``column`` (e.g. ``Market_Value_Source``) is ``"proxy"``."""
+    if column not in df.columns or df.empty:
+        return 0.0
+    return float((df[column] == "proxy").mean())
 
 
 # --------------------------------------------------------------------------- #

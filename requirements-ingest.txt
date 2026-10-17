@@ -1,0 +1,3 @@
+# Real-data ingestion only (scripts/ingest_fbref.py). The dashboard does not need these.
+-r requirements.txt
+soccerdata==1.9.1

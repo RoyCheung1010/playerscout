@@ -6,6 +6,7 @@ from here so that a schema change is made in exactly one place.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Final
 
 # --------------------------------------------------------------------------- #
@@ -178,4 +179,45 @@ DEFAULT_MIN_MINUTES: Final[int] = 900
 DEFAULT_PADJ_STEEPNESS: Final[float] = 0.05
 # Season the data describes; contract "years remaining" are measured from it.
 CURRENT_SEASON_END_YEAR: Final[int] = 2026
+
+# --------------------------------------------------------------------------- #
+# Real data (FBref ingestion)
+# --------------------------------------------------------------------------- #
+PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
+PROCESSED_DATA_DIR: Final[Path] = PROJECT_ROOT / "data" / "processed"
+DEFAULT_REAL_SEASON: Final[str] = "2023-2024"
+
+# soccerdata league id -> display name used throughout the platform.
+FBREF_LEAGUES: Final[dict[str, str]] = {
+    "ENG-Premier League": "Premier League",
+    "ESP-La Liga": "La Liga",
+    "GER-Bundesliga": "Bundesliga",
+    "ITA-Serie A": "Serie A",
+    "FRA-Ligue 1": "Ligue 1",
+}
+
+# Provenance column values: where each processed dataset came from.
+DATA_ORIGIN_COLUMN: Final[str] = "Data_Origin"
+ORIGIN_FBREF: Final[str] = "fbref"
+ORIGIN_BENCHMARK: Final[str] = "synthetic-benchmark"
+
+
+def real_data_filename(season: str, origin: str = ORIGIN_FBREF) -> str:
+    """``real_players_2023_2024`` or ``benchmark_players_2023_2024`` (no suffix)."""
+    prefix = "real_players" if origin == ORIGIN_FBREF else "benchmark_players"
+    return f"{prefix}_{season.replace('-', '_')}"
+
+
+def season_end_year(season: str) -> int:
+    """``"2023-2024"`` / ``"2324"`` / ``"2024"`` -> 2024."""
+    digits = "".join(ch for ch in str(season) if ch.isdigit())
+    if len(digits) == 8:
+        return int(digits[4:])
+    if len(digits) == 4 and (int(digits[2:]) - int(digits[:2])) % 100 == 1:
+        # soccerdata short form: "2324" -> 2024, "9900" -> 2000.
+        end = int(digits[2:])
+        return (2000 if end < 50 else 1900) + end
+    if len(digits) == 4:
+        return int(digits)
+    raise ValueError(f"Unrecognised season format: {season!r}")
 RANDOM_STATE: Final[int] = 42

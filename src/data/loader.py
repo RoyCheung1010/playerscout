@@ -25,7 +25,14 @@ from typing import IO, Union
 import numpy as np
 import pandas as pd
 
+from pathlib import Path
+
 from src.config import (
+    DATA_ORIGIN_COLUMN,
+    DEFAULT_REAL_SEASON,
+    ORIGIN_BENCHMARK,
+    ORIGIN_FBREF,
+    PROCESSED_DATA_DIR,
     DEFAULT_LEAGUE_COEFFICIENT,
     DEFAULT_MIN_MINUTES,
     DEFAULT_PADJ_STEEPNESS,
@@ -37,6 +44,7 @@ from src.config import (
     RAW_COUNT_COLUMNS,
     RAW_RATE_COLUMNS,
     REQUIRED_RAW_COLUMNS,
+    real_data_filename,
 )
 from src.data.synthetic_generator import GeneratorConfig, generate_synthetic_players
 
@@ -49,6 +57,43 @@ _POSITION_SPLIT = re.compile(r"[,/;|\-\s]+")
 
 class DataValidationError(ValueError):
     """Raised when an input table cannot be mapped onto the scouting schema."""
+
+
+class RealDataNotFoundError(FileNotFoundError):
+    """No processed real (or benchmark) dataset exists for the season."""
+
+
+@dataclass(frozen=True)
+class RealDataset:
+    """Location and provenance of a processed real-data file."""
+
+    path: Path
+    origin: str  # ORIGIN_FBREF or ORIGIN_BENCHMARK
+    season: str
+
+    @property
+    def is_real(self) -> bool:
+        return self.origin == ORIGIN_FBREF
+
+
+def find_real_dataset(
+    season: str = DEFAULT_REAL_SEASON,
+    data_dir: Path | str | None = None,
+    allow_benchmark: bool = True,
+) -> RealDataset | None:
+    """Locate the processed file for ``season``: real first, then the benchmark.
+
+    Parquet is preferred; the CSV twin is used if only it exists.
+    """
+    directory = Path(data_dir) if data_dir is not None else PROCESSED_DATA_DIR
+    origins = (ORIGIN_FBREF, ORIGIN_BENCHMARK) if allow_benchmark else (ORIGIN_FBREF,)
+    for origin in origins:
+        stem = real_data_filename(season, origin)
+        for suffix in (".parquet", ".csv"):
+            candidate = directory / f"{stem}{suffix}"
+            if candidate.is_file():
+                return RealDataset(candidate, origin, season)
+    return None
 
 
 @dataclass(frozen=True)
@@ -158,6 +203,34 @@ class DataLoader:
     ) -> pd.DataFrame:
         """Read ``source`` (``None`` = synthetic DB) and run the full pipeline."""
         return self.process(self.read(source, generator_config))
+
+    def load_real(
+        self,
+        season: str = DEFAULT_REAL_SEASON,
+        data_dir: Path | str | None = None,
+        allow_benchmark: bool = True,
+    ) -> pd.DataFrame:
+        """Load the processed FBref dataset for ``season`` through the full pipeline.
+
+        The file is produced by ``scripts/ingest_fbref.py`` and goes through
+        exactly the same validation, per-90, pAdj and league scaling as any
+        other source. If only the synthetic benchmark exists (ingestion fell
+        back) it is loaded instead; its rows carry
+        ``Data_Origin == "synthetic-benchmark"`` so callers can warn about it.
+
+        Raises:
+            RealDataNotFoundError: no processed file exists for the season.
+        """
+        dataset = find_real_dataset(season, data_dir, allow_benchmark)
+        if dataset is None:
+            raise RealDataNotFoundError(
+                f"No processed data for {season} in {Path(data_dir) if data_dir else PROCESSED_DATA_DIR}. "
+                "Run: python scripts/ingest_fbref.py"
+            )
+        raw = pd.read_parquet(dataset.path) if dataset.path.suffix == ".parquet" else _read_csv_with_fallback(dataset.path)
+        if DATA_ORIGIN_COLUMN not in raw.columns:
+            raw[DATA_ORIGIN_COLUMN] = dataset.origin
+        return self.process(raw)
 
     @staticmethod
     def read(source: DataSource = None, generator_config: GeneratorConfig | None = None) -> pd.DataFrame:

@@ -29,13 +29,21 @@ from matplotlib.figure import Figure
 from src import pipeline
 from src.config import (
     CORE_FEATURES,
-    CURRENT_SEASON_END_YEAR,
     DEFAULT_MIN_MINUTES,
     DEFAULT_PADJ_STEEPNESS,
+    DEFAULT_REAL_SEASON,
+    ORIGIN_BENCHMARK,
     POSITION_GROUPS,
     RANDOM_STATE,
 )
-from src.data.loader import DataLoader, DataValidationError, LoaderConfig
+from src.data.loader import (
+    DataLoader,
+    DataValidationError,
+    LoaderConfig,
+    RealDataNotFoundError,
+    find_real_dataset,
+)
+from src.data.real_data_enricher import CONTRACT_SOURCE_COLUMN, VALUE_SOURCE_COLUMN
 from src.data.synthetic_generator import GeneratorConfig
 from src.exceptions import InsufficientDataError
 from src.features.preprocessor import ScalerType, ScoutingPreprocessor
@@ -43,6 +51,7 @@ from src.models.similarity import Metric
 from src.visualization import plots
 
 SYNTHETIC = "Synthetic Enterprise DB"
+REAL = "Real Data (2023-24 Top 5 European Leagues)"
 UPLOAD = "Upload Custom CSV"
 SCALERS: dict[str, ScalerType] = {"RobustScaler (IQR)": "robust", "StandardScaler (Z-score)": "standard"}
 METRICS: dict[str, Metric] = {
@@ -78,8 +87,13 @@ def load_dataset(
     min_minutes: int,
     padj_steepness: float,
     apply_league_scaling: bool,
+    real_file_stamp: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Ingest, adjust and percentile-rank the full database (all positions)."""
+    """Ingest, adjust and percentile-rank the full database (all positions).
+
+    ``real_file_stamp`` (path + modification time) is only a cache key: a
+    re-run of the ingestion script invalidates the cached real dataset.
+    """
     loader = DataLoader(LoaderConfig(
         min_minutes=min_minutes,
         padj_steepness=padj_steepness,
@@ -87,6 +101,8 @@ def load_dataset(
     ))
     if source_kind == UPLOAD:
         df = loader.load(io.BytesIO(file_bytes or b""))
+    elif source_kind == REAL:
+        df = loader.load_real(DEFAULT_REAL_SEASON)
     else:
         df = loader.load(generator_config=GeneratorConfig(seed=seed, include_ground_truth=True))
     report = asdict(loader.last_report)
@@ -198,6 +214,49 @@ def show_pipeline_status(report: dict[str, object], source: str, cohort_size: in
         )
 
 
+def describe_source(source: str, seed: int, file_bytes: bytes | None, real_stamp: str | None) -> str:
+    if source == SYNTHETIC:
+        return f"{SYNTHETIC} (seed {seed})"
+    if source == REAL:
+        path = (real_stamp or "").split("|")[0]
+        return f"{REAL} — {path}"
+    return f"Uploaded CSV ({len(file_bytes or b'') / 1024:,.0f} KB)"
+
+
+def show_real_data_missing() -> None:
+    st.info(
+        "**Real data has not been ingested yet.**\n\n"
+        "Build it once (FBref, 2023-24 Top 5 leagues; takes a few minutes):\n\n"
+        "```bash\npip install -r requirements-ingest.txt\npython scripts/ingest_fbref.py\n```\n\n"
+        "If FBref shows a CAPTCHA, re-run with `--interactive` and solve it in the browser window. "
+        "Downloads are cached, so later runs work offline. Switch to the Synthetic Enterprise DB "
+        "in the meantime.",
+        icon=":material/cloud_download:",
+    )
+
+
+def show_provenance_banner(df: pd.DataFrame) -> None:
+    """Make it impossible to mistake estimated or synthetic data for fact."""
+    if pipeline.dataset_origin(df) == ORIGIN_BENCHMARK:
+        st.warning(
+            "**Synthetic benchmark, not real players.** FBref could not be reached when the ingestion "
+            "script ran (rate limit, CAPTCHA or network), so it wrote a synthetic stand-in with the same "
+            "schema. Re-run `python scripts/ingest_fbref.py --interactive` to fetch the real data.",
+            icon=":material/warning:",
+        )
+        return
+    value_proxy = pipeline.proxy_share(df, VALUE_SOURCE_COLUMN)
+    contract_proxy = pipeline.proxy_share(df, CONTRACT_SOURCE_COLUMN)
+    if value_proxy or contract_proxy:
+        st.info(
+            f"Real FBref performance data. **Market values ({value_proxy:.0%}) and contract expiries "
+            f"({contract_proxy:.0%}) are model estimates**, not Transfermarkt figures: values are a proxy "
+            "from age, league, minutes and percentiles; contracts are assigned deterministically within "
+            "2026-2029. Treat budget and contract filters as indicative.",
+            icon=":material/info:",
+        )
+
+
 def style_value_diff(value: float) -> str:
     if pd.isna(value) or value == 0:
         return ""
@@ -211,13 +270,13 @@ def sidebar_data_controls() -> tuple[str, bytes | None, int, int, float, bool]:
     with st.sidebar:
         st.header("Recruitment Filters")
         with st.expander("Data Source & Scope", expanded=True, icon=":material/database:"):
-            source = st.radio("Data source", [SYNTHETIC, UPLOAD], key="source")
+            source = st.radio("Data source", [SYNTHETIC, REAL, UPLOAD], key="source")
             file_bytes: bytes | None = None
             seed = RANDOM_STATE
             if source == UPLOAD:
                 uploaded = st.file_uploader("Player season CSV (FBref-style)", type=["csv"])
                 file_bytes = uploaded.getvalue() if uploaded is not None else None
-            else:
+            elif source == SYNTHETIC:
                 seed = int(st.number_input("Synthetic DB seed", 0, 10_000, RANDOM_STATE, step=1))
             min_minutes = st.slider("Minimum minutes played", 0, 3000, DEFAULT_MIN_MINUTES, step=90)
         with st.expander("Contextual Adjustments", icon=":material/tune:"):
@@ -227,7 +286,7 @@ def sidebar_data_controls() -> tuple[str, bytes | None, int, int, float, bool]:
     return source, file_bytes, seed, min_minutes, padj, league_scaling
 
 
-def sidebar_model_controls(df: pd.DataFrame) -> dict[str, object]:
+def sidebar_model_controls(df: pd.DataFrame, reference_year: int) -> dict[str, object]:
     leagues_available = sorted(df["League"].dropna().unique().tolist())
     groups_available = [g for g in POSITION_GROUPS[::-1] if g in set(df["Position_Group"])]  # FW, MF, DF
     with st.sidebar:
@@ -239,13 +298,13 @@ def sidebar_model_controls(df: pd.DataFrame) -> dict[str, object]:
             max_age = st.slider("Max age", 18, 40, 40, key="max_age")
             value_cap = float(max(np.ceil(df["Market_Value_EUR_M"].max()), 1.0))
             max_value = st.slider("Max market value (€M)", 0.0, value_cap, value_cap, step=0.5, key="max_value")
-            years = (df["Contract_Expiry_Year"] - CURRENT_SEASON_END_YEAR).astype(int)
+            years = (df["Contract_Expiry_Year"] - reference_year).astype(int)
             year_options = list(range(max(int(years.min()), 0), max(int(years.max()), 0) + 1))
             contract_years: int | None = None
             if len(year_options) > 1:
                 contract_years = st.select_slider(
                     "Max contract years remaining", options=year_options, value=year_options[-1],
-                    key="contract_years", help=f"Counted from the {CURRENT_SEASON_END_YEAR} season end.",
+                    key="contract_years", help=f"Counted from the {reference_year} season end.",
                 )
 
         with st.expander("Model Hyperparameters", expanded=True, icon=":material/model_training:"):
@@ -274,6 +333,7 @@ def sidebar_model_controls(df: pd.DataFrame) -> dict[str, object]:
         "metric_label": metric_label,
         "metric": METRICS[metric_label],
         "weights": weights,
+        "reference_year": reference_year,
     }
 
 
@@ -472,14 +532,24 @@ def main() -> None:
                            file_name="scoutintel_template.csv", mime="text/csv")
         st.stop()
 
+    real_stamp: str | None = None
+    if source == REAL:
+        dataset = find_real_dataset(DEFAULT_REAL_SEASON)
+        if dataset is None:
+            show_real_data_missing()
+            st.stop()
+        real_stamp = f"{dataset.path}|{dataset.path.stat().st_mtime_ns}"
+
     try:
-        df, report = load_dataset(source, file_bytes, seed, min_minutes, padj, league_scaling)
+        df, report = load_dataset(source, file_bytes, seed, min_minutes, padj, league_scaling, real_stamp)
+    except RealDataNotFoundError:
+        show_real_data_missing()
+        st.stop()
     except DataValidationError as exc:
         st.error(f"Could not load the uploaded file: {exc}", icon=":material/error:")
         st.stop()
 
-    source_desc = f"{SYNTHETIC} (seed {seed})" if source == SYNTHETIC else (
-        f"Uploaded CSV ({len(file_bytes or b'') / 1024:,.0f} KB)")
+    source_desc = describe_source(source, seed, file_bytes, real_stamp)
     if df.empty:
         show_pipeline_status(report, source_desc, None)
         st.error("No players survive validation and the minutes threshold. Lower the minimum minutes "
@@ -489,7 +559,9 @@ def main() -> None:
         st.warning(f"{report['n_invalid']} uploaded rows were dropped as invalid (non-numeric or "
                    "out-of-range values). See the pipeline status for the full drop log.")
 
-    controls = sidebar_model_controls(df)
+    if source == REAL:
+        show_provenance_banner(df)
+    controls = sidebar_model_controls(df, pipeline.dataset_reference_year(df))
     if not controls["leagues"]:
         show_pipeline_status(report, source_desc, 0)
         st.warning("Select at least one league in the sidebar.")
@@ -498,7 +570,12 @@ def main() -> None:
     cohort = pipeline.filter_cohort(df, controls["position"], controls["leagues"])
     show_pipeline_status(report, source_desc, len(cohort))
 
-    data_key = (hashlib.sha256(file_bytes).hexdigest()[:16] if file_bytes else f"synthetic-{seed}")
+    if file_bytes:
+        data_key = hashlib.sha256(file_bytes).hexdigest()[:16]
+    elif source == REAL:
+        data_key = f"real-{hashlib.sha256((real_stamp or '').encode()).hexdigest()[:12]}"
+    else:
+        data_key = f"synthetic-{seed}"
     cohort_key = f"{data_key}|{min_minutes}|{padj}|{league_scaling}|{controls['position']}|" + \
         ",".join(sorted(controls["leagues"]))
     model_key = f"{cohort_key}|k={controls['k']}|{controls['scaler']}"
@@ -530,7 +607,7 @@ def main() -> None:
 
     try:
         shortlist = pipeline.run_shortlist(model, player, squad, controls["metric"], controls["weights"],
-                                           controls["filters"])
+                                           controls["filters"], reference_year=controls["reference_year"])
         scores = pipeline.match_scores(model, player, squad, controls["metric"], controls["weights"])
     except ValueError as exc:  # e.g. every feature weight set to zero
         st.error(f"Similarity search unavailable: {exc}")

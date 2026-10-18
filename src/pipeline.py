@@ -27,6 +27,7 @@ from src.exceptions import InsufficientDataError
 from src.features.preprocessor import ScalerType, ScoutingPreprocessor
 from src.models.clustering import DEFAULT_K_RANGE, TacticalClusterer
 from src.models.pca import TacticalPCA
+from src.models.roles import percentile_profiles, positional_role_labels
 from src.models.similarity import Metric, ScoutingSimilarityEngine
 
 GROUND_TRUTH_COLUMN = "Generator_Archetype"
@@ -176,13 +177,27 @@ def build_cohort_model(cohort: pd.DataFrame, n_clusters: int, scaler_type: Scale
     pca = TacticalPCA().fit(X)
     clusterer = TacticalClusterer(n_clusters=n_clusters)
     labels = clusterer.fit_predict(X)
-    roles = clusterer.role_labels(list(CORE_FEATURES))
+    roles = role_names_for(cohort, labels, clusterer)
 
     enriched = cohort.reset_index(drop=True).copy()
     enriched["Cluster"] = labels
     enriched["Assigned_Role"] = pd.Series(labels).map(roles).to_numpy()
     enriched[["PC1", "PC2"]] = pca.transform(X)
     return CohortModel(enriched, X, pca, clusterer.centroids_, roles, scaler_type)
+
+
+def role_names_for(cohort: pd.DataFrame, labels: np.ndarray, clusterer: TacticalClusterer) -> dict[int, str]:
+    """Position-aware role names when the cohort is one position group with
+    percentiles (:mod:`src.models.roles`); the generic feature-pair lookup otherwise."""
+    features = list(CORE_FEATURES)
+    groups = cohort["Position_Group"].dropna().unique() if "Position_Group" in cohort.columns else []
+    if len(groups) == 1:
+        profiles = percentile_profiles(cohort, labels, features)
+        if profiles is not None and len(profiles) == clusterer.n_clusters:
+            named = positional_role_labels(profiles, features, str(groups[0]))
+            if named is not None:
+                return named
+    return clusterer.role_labels(features)
 
 
 def compute_diagnostics(X: np.ndarray, k_range: range = DEFAULT_K_RANGE) -> dict[str, list[float]]:
@@ -309,6 +324,10 @@ def cluster_summary(model: CohortModel) -> pd.DataFrame:
     """One row per cluster: role, size, share of cohort, signature traits."""
     sizes = model.cohort["Cluster"].value_counts()
     total = max(len(model.cohort), 1)
+    # Traits read from mean within-position percentiles when available: scaled
+    # centroids exaggerate sparse stats (a defender's goals) under RobustScaler.
+    profiles = percentile_profiles(model.cohort, model.labels, list(CORE_FEATURES))
+    signature = profiles if profiles is not None and len(profiles) == len(model.centroids) else model.centroids
     rows = []
     for cid, role in sorted(model.role_names.items()):
         size = int(sizes.get(cid, 0))
@@ -317,7 +336,7 @@ def cluster_summary(model: CohortModel) -> pd.DataFrame:
             "Tactical Role": role,
             "Players": size,
             "Share (%)": round(100.0 * size / total, 1),
-            "Top Traits": " + ".join(top_traits(model.centroids[cid])),
+            "Top Traits": " + ".join(top_traits(signature[cid])),
             "Median Value (€M)": round(
                 float(model.cohort.loc[model.cohort["Cluster"] == cid, "Market_Value_EUR_M"].median()), 1
             ) if size else 0.0,

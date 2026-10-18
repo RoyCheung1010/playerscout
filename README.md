@@ -228,22 +228,45 @@ work; a test asserts this.
   cluster and $b$ to the nearest other cluster. Values of k that the silhouette
   cannot handle ($k \ge n$) are skipped rather than crashing.
 
-**Automatic role labelling.** Because clustering runs in scaled space, a
-centroid coordinate reads as "how far above or below the cohort norm this group
-sits." The two most positive coordinates define the role through a 24-entry
-lookup table, for example:
+**Automatic role labelling (`src/models/roles.py`).** Each cluster is
+described by its **percentile profile**: the mean within-position percentile
+of its members on every feature, re-centred so 0 is the position median and
+±1 the extremes. Percentiles are bounded, so no sparse stat can swamp the
+description. (Reading the scaled centroids instead misfires on real data:
+under RobustScaler a defender's goals have a median of 0 and a tiny IQR, so a
+centre-back who scores two headers looks like a finisher.)
 
-| Dominant pair | Role |
+Each position has a catalogue of football roles, each a template of expected
+deviations from the norm:
+
+| Position | Roles |
 |---|---|
-| Goals + Shots | Direct Goal Threat / Poacher |
-| Progressive Passes + Pass Completion | Deep-Lying Playmaker / Recycler |
-| Tackles + Interceptions | Ball-Winning Destroyer |
-| Take-Ons + Key Passes | Dynamic 1v1 Creator |
+| FW | Penalty-Box Striker, Complete Forward, Dribbling Winger, Creative Playmaker, Pressing Forward, Low-Involvement Forward |
+| MF | Deep-Lying Playmaker, Ball-Winning Midfielder, Box-to-Box Midfielder, Attacking Playmaker, Goal-Scoring Midfielder, Ball-Carrying Midfielder, Low-Involvement Midfielder |
+| DF | Ball-Playing Centre-Back, Stopper Centre-Back, Positional Centre-Back, Set-Piece Threat Centre-Back, Attacking Full-Back, Defensive Full-Back, Low-Involvement Defender |
 
-Unmapped pairs, or pairs whose deviation is too weak to be distinctive
-(< 0.25), fall back to `"Balanced <Trait 1> & <Trait 2> Specialist"`. Duplicate
-names are disambiguated with the third-strongest trait, so every label is
-unique.
+A cluster takes the role whose template it matches best by **cosine
+similarity**. The Hungarian algorithm gives clusters distinct roles when that
+costs at most 0.15 of fit; genuine look-alikes share a role, qualified by the
+trait where each leads (`Attacking Full-Back (+ Shot Volume)`) or `(Lower
+Volume)` when it leads nowhere. A cluster that fits no template (cosine
+< 0.3) is called `Hybrid <Trait 1> & <Trait 2> Profile`. The cluster table's
+"Top Traits" come from the same percentile profile.
+
+On 2023-24 at k = 5 this gives, for example: Kane, Haaland and Lautaro as
+Penalty-Box Strikers; Vinícius, Saka and Griezmann as Complete Forwards; Leão,
+Sané and Doku as Dribbling Wingers; Rodri, Kroos and Kimmich as Deep-Lying
+Playmakers; Bellingham, Ødegaard and Wirtz as Attacking Playmakers; Dias,
+Bastoni and Gvardiol as Ball-Playing Centre-Backs; Saliba and Rüdiger as
+Positional Centre-Backs; van Dijk, Araújo and Gabriel as Set-Piece Threat
+Centre-Backs; Trent, Hakimi and Theo as Attacking Full-Backs. Names describe
+2023-24 output, not reputation: a 16-year-old Lamine Yamal, 100th percentile
+for tackles among forwards and 30th for goals, is a Pressing Forward.
+
+Cohorts mixing positions (only reachable through the API) fall back to the
+original 24-entry feature-pair lookup (`ROLE_LOOKUP` in
+`src/models/clustering.py`), e.g. Goals + Shots -> "Direct Goal Threat /
+Poacher".
 
 **Validation against ground truth.** The synthetic generator records each
 player's hidden archetype, which lets us measure how well clustering recovers
@@ -385,7 +408,7 @@ and `kagglehub 1.0.2` (`requirements-ingest.txt`).
 
 ## Testing & quality assurance
 
-**329 tests**, all passing, and also passing under `pytest -W error` (every
+**342 tests**, all passing, and also passing under `pytest -W error` (every
 warning treated as a failure). The full suite runs in about 25 seconds and
 needs no network access: FBref and the Kaggle snapshot are replaced by
 fixtures shaped exactly like their real output.
@@ -399,6 +422,7 @@ fixtures shaped exactly like their real output.
 | `test_clustering.py` | 29 | Label ranges, diagnostics edge cases ($k \ge n$, duplicate points), unique role labels, NMI > 0.40 vs ground truth |
 | `test_similarity.py` | 32 | Target exclusion, clone = 100%, cosine vs Euclidean behaviour, weight math, strict filter pruning, filters never changing scores |
 | `test_plots.py` | 45 | Headless (`Agg`) rendering of every chart, value clipping, axis dimensions, theme isolation, **memory safety** |
+| `test_roles.py` | 13 | Forward and defender roles named from percentile profiles, centre-backs never called finishers, unique labels with qualified look-alikes and "Lower Volume", more clusters than roles, Hybrid fallback, template sanity, pipeline uses positional roles per group and falls back for mixed cohorts, traits from percentiles |
 | `test_transfermarkt.py` | 24 | Name variants accepted and look-alikes rejected, exact and fuzzy matching, namesakes split by birth year, same name and year split by league, no cross-year or double claims, season-end values, listed contracts only for tracked players, snapshot reference year, proxies kept when unmatched |
 | `test_fbref_snapshot.py` | 19 | Snapshot columns onto the raw schema (season-minutes quirk, take-ons from rate), schema and season errors, possession parsed from cached FBref pages (including comment-wrapped tables) with club aliases, transfer merging with weighted possession, namesakes, loader + model end-to-end, script success, Transfermarkt attachment, no-cache and failure paths |
 | `test_real_data_pipeline.py` | 38 | FBref header flattening onto the raw schema, transfer deduplication (season totals, primary club, minutes-weighted possession, namesakes kept apart), enrichment with no nulls and deterministic proxies, `load_real` through the full pipeline, real-over-benchmark precedence, the rate-limit fallback never writing to the real path, failure classification, headless-by-default fetching |
@@ -639,9 +663,10 @@ playerscout/
 │   │   └── preprocessor.py        # scaling, eCDF percentiles, composites
 │   ├── models/
 │   │   ├── pca.py                 # TacticalPCA
-│   │   ├── clustering.py          # TacticalClusterer + role labelling
+│   │   ├── clustering.py          # TacticalClusterer + generic role lookup
+│   │   ├── roles.py               # position-aware role names from percentiles
 │   │   └── similarity.py          # ScoutingSimilarityEngine
 │   └── visualization/
 │       └── plots.py               # dark-theme Matplotlib suite
-└── tests/                         # 329 tests (see above)
+└── tests/                         # 342 tests (see above)
 ```

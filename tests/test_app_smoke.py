@@ -320,7 +320,7 @@ def test_real_source_without_data_shows_instructions(tmp_path: Path, monkeypatch
     at = _real_source_app(monkeypatch, tmp_path)
     assert not at.exception
     assert any("Real data has not been ingested yet" in i.value for i in at.info)
-    assert any("ingest_fbref.py" in i.value for i in at.info)
+    assert any("ingest_fbref_snapshot.py --download" in i.value for i in at.info)
 
 
 def test_real_source_benchmark_is_flagged_as_synthetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

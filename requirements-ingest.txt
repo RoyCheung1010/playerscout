@@ -1,3 +1,4 @@
-# Real-data ingestion only (scripts/ingest_fbref.py). The dashboard does not need these.
+# Real-data ingestion only (scripts/ingest_fbref*.py). The dashboard does not need these.
 -r requirements.txt
 soccerdata==1.9.1
+kagglehub==1.0.2

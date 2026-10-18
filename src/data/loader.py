@@ -212,7 +212,8 @@ class DataLoader:
     ) -> pd.DataFrame:
         """Load the processed FBref dataset for ``season`` through the full pipeline.
 
-        The file is produced by ``scripts/ingest_fbref.py`` and goes through
+        The file is produced by ``scripts/ingest_fbref_snapshot.py`` (or
+        ``scripts/ingest_fbref.py``) and goes through
         exactly the same validation, per-90, pAdj and league scaling as any
         other source. If only the synthetic benchmark exists (ingestion fell
         back) it is loaded instead; its rows carry
@@ -225,7 +226,7 @@ class DataLoader:
         if dataset is None:
             raise RealDataNotFoundError(
                 f"No processed data for {season} in {Path(data_dir) if data_dir else PROCESSED_DATA_DIR}. "
-                "Run: python scripts/ingest_fbref.py"
+                "Run: python scripts/ingest_fbref_snapshot.py --download"
             )
         raw = pd.read_parquet(dataset.path) if dataset.path.suffix == ".parquet" else _read_csv_with_fallback(dataset.path)
         if DATA_ORIGIN_COLUMN not in raw.columns:

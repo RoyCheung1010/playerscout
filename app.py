@@ -226,11 +226,10 @@ def describe_source(source: str, seed: int, file_bytes: bytes | None, real_stamp
 def show_real_data_missing() -> None:
     st.info(
         "**Real data has not been ingested yet.**\n\n"
-        "Build it once (FBref, 2023-24 Top 5 leagues; takes a few minutes):\n\n"
-        "```bash\npip install -r requirements-ingest.txt\npython scripts/ingest_fbref.py\n```\n\n"
-        "If FBref shows a CAPTCHA, re-run with `--interactive` and solve it in the browser window. "
-        "Downloads are cached, so later runs work offline. Switch to the Synthetic Enterprise DB "
-        "in the meantime.",
+        "Build it once from the FBref 2023-24 Top 5 snapshot (under a minute):\n\n"
+        "```bash\npip install -r requirements-ingest.txt\npython scripts/ingest_fbref_snapshot.py --download\n```\n\n"
+        "Team possession is read from FBref pages cached by `scripts/ingest_fbref.py`; without them "
+        "it defaults to a neutral 50%. Switch to the Synthetic Enterprise DB in the meantime.",
         icon=":material/cloud_download:",
     )
 
@@ -241,7 +240,7 @@ def show_provenance_banner(df: pd.DataFrame) -> None:
         st.warning(
             "**Synthetic benchmark, not real players.** FBref could not be reached when the ingestion "
             "script ran (rate limit, CAPTCHA or network), so it wrote a synthetic stand-in with the same "
-            "schema. Re-run `python scripts/ingest_fbref.py --interactive` to fetch the real data.",
+            "schema. Run `python scripts/ingest_fbref_snapshot.py --download` to build the real data.",
             icon=":material/warning:",
         )
         return

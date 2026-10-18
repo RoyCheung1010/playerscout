@@ -6,6 +6,14 @@ Usage::
     python scripts/ingest_fbref.py --interactive      # visible browser: solve FBref's CAPTCHA once
     python scripts/ingest_fbref.py --no-fallback      # fail instead of writing the benchmark
 
+Note (2026): FBref no longer publishes its advanced Opta tables, and
+soccerdata 1.9.x only reads ``standard``, ``keeper``, ``shooting``,
+``playing_time`` and ``misc``, so the ``passing`` fetch below now fails
+and this script falls back to the benchmark. Use
+``scripts/ingest_fbref_snapshot.py`` for the real 2023-24 data; this
+script remains useful for caching FBref's league pages, which carry
+the team possession the snapshot lacks.
+
 Pipeline: five player stat tables + the team standard table per league
 (``soccerdata.FBref``) -> transfer deduplication -> possession mapping ->
 valuation/contract enrichment -> ``real_players_<season>.parquet`` and ``.csv``.

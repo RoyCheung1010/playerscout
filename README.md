@@ -46,7 +46,7 @@ answer:
 
 ```mermaid
 flowchart LR
-    R[FBref via soccerdata<br/>scripts/ingest_fbref.py] --> P[(data/processed<br/>real_players_*.parquet)]
+    R[FBref 2023-24 snapshot + cached possession<br/>scripts/ingest_fbref_snapshot.py] --> P[(data/processed<br/>real_players_*.parquet)]
     A[Synthetic DB / CSV upload] --> B[DataLoader<br/>validate · filter · per-90<br/>pAdj · league scaling]
     P --> B
     B --> C[ScoutingPreprocessor<br/>positional eCDF percentiles<br/>composite scores]
@@ -370,7 +370,7 @@ pytest
 streamlit run app.py
 
 # 5. Optional: ingest real 2023-24 data (see "Real data" below)
-python scripts/ingest_fbref.py
+python scripts/ingest_fbref_snapshot.py --download
 ```
 
 The dashboard opens at <http://localhost:8501>. Use `--server.port` to change
@@ -379,16 +379,16 @@ the port.
 Pinned runtime dependencies (`requirements.txt`): `streamlit 1.66.0`,
 `pandas 3.0.6`, `numpy 2.5.4`, `scipy 1.18.1`, `scikit-learn 1.9.1`,
 `matplotlib 3.11.2`, `pyarrow 26.0.0`. Ingestion adds `soccerdata 1.9.1`
-(`requirements-ingest.txt`).
+and `kagglehub 1.0.2` (`requirements-ingest.txt`).
 
 ---
 
 ## Testing & quality assurance
 
-**285 tests**, all passing, and also passing under `pytest -W error` (every
+**303 tests**, all passing, and also passing under `pytest -W error` (every
 warning treated as a failure). The full suite runs in about 25 seconds and
-needs no network access: FBref is replaced by fixtures shaped exactly like
-`soccerdata` output.
+needs no network access: FBref and the Kaggle snapshot are replaced by
+fixtures shaped exactly like their real output.
 
 | Suite | Tests | Covers |
 |---|---|---|
@@ -399,6 +399,7 @@ needs no network access: FBref is replaced by fixtures shaped exactly like
 | `test_clustering.py` | 29 | Label ranges, diagnostics edge cases ($k \ge n$, duplicate points), unique role labels, NMI > 0.40 vs ground truth |
 | `test_similarity.py` | 32 | Target exclusion, clone = 100%, cosine vs Euclidean behaviour, weight math, strict filter pruning, filters never changing scores |
 | `test_plots.py` | 45 | Headless (`Agg`) rendering of every chart, value clipping, axis dimensions, theme isolation, **memory safety** |
+| `test_fbref_snapshot.py` | 18 | Snapshot columns onto the raw schema (season-minutes quirk, take-ons from rate), schema and season errors, possession parsed from cached FBref pages (including comment-wrapped tables) with club aliases, transfer merging with weighted possession, namesakes, loader + model end-to-end, script success, no-cache and failure paths |
 | `test_real_data_pipeline.py` | 38 | FBref header flattening onto the raw schema, transfer deduplication (season totals, primary club, minutes-weighted possession, namesakes kept apart), enrichment with no nulls and deterministic proxies, `load_real` through the full pipeline, real-over-benchmark precedence, the rate-limit fallback never writing to the real path, failure classification, headless-by-default fetching |
 | `test_app_smoke.py` | 38 | Pipeline helpers, plus `app.py` run end-to-end with Streamlit's `AppTest`: every cohort, metric and scaler, impossible filters, all-zero weights, empty league selection, upload mode, and the Real Data source (missing file, benchmark warning, estimate notice) |
 
@@ -425,16 +426,31 @@ Hypothesis); invariants are checked on fixed seeded data.
 
 ## Real data (FBref 2023-24)
 
-The platform can run on real Top 5 league data for the 2023-24 season,
-ingested from [FBref](https://fbref.com) with
-[`soccerdata`](https://github.com/probberechts/soccerdata).
+The platform runs on real Top 5 league data for the 2023-24 season: 2,508
+players (after merging 115 mid-season transfers), 96 clubs, every stat the
+model uses, and real team possession.
+
+### Where the data comes from
+
+FBref no longer publishes its advanced (Opta) tables: passing, possession
+and defense. `soccerdata` 1.9.x accordingly only reads `standard`, `keeper`,
+`shooting`, `playing_time` and `misc`, so four of the nine core metrics (key
+passes, pass completion, progressive passes, take-ons) can no longer be
+scraped. The full season tables therefore come from a **snapshot of FBref
+scraped before the change**, published on Kaggle:
+
+- **Stats:** [`akshankrithick/fbref-2017-2024-for-europes-top-5-leagues`](https://www.kaggle.com/datasets/akshankrithick/fbref-2017-2024-for-europes-top-5-leagues),
+  file `cleaned_2023-24.csv` (one row per player per club).
+- **Team possession:** FBref's squad table, which is embedded in the league
+  player-stats pages that `soccerdata` caches under `~/soccerdata/data/FBref`
+  (`scripts/ingest_fbref.py` caches them).
 
 ### Running the ingestion
 
 ```bash
 pip install -r requirements-ingest.txt
-python scripts/ingest_fbref.py                  # headless browser
-python scripts/ingest_fbref.py --interactive    # visible browser, for FBref's CAPTCHA
+python scripts/ingest_fbref_snapshot.py --download     # fetch the Kaggle snapshot (public, no login)
+python scripts/ingest_fbref_snapshot.py --csv path/to/cleaned_2023-24.csv
 ```
 
 Then choose **Real Data (2023-24 Top 5 European Leagues)** in the dashboard
@@ -442,33 +458,60 @@ sidebar.
 
 | Option | Effect |
 |---|---|
+| `--download` / `--csv PATH` | Get the snapshot via `kagglehub`, or use a local copy (one is required). |
 | `--season 2023-2024` | Season to ingest (default). |
-| `--leagues "ENG-Premier League" "ESP-La Liga"` | Subset of the Top 5 (default: all five). |
-| `--interactive` | Opens a visible browser so you can solve FBref's CAPTCHA by hand. |
-| `--no-fallback` | Exit with an error instead of writing the benchmark (see below). |
+| `--fbref-cache DIR` | Where the cached FBref pages live (default `~/soccerdata/data/FBref`). |
 | `--out-dir PATH` | Output directory (default `data/processed/`). |
 
-Exit codes: `0` real data written, `1` fallback benchmark written, `2` failed
-with `--no-fallback`.
+Exit codes: `0` real data written, `2` failed (nothing written). There is no
+synthetic fallback in this script.
+
+If no cached FBref pages are found, possession defaults to a neutral 50%
+(pAdj multiplier exactly 1.0) and a warning is logged. To cache them, run
+`python scripts/ingest_fbref.py --interactive` once and solve FBref's CAPTCHA.
+That script's own passing/possession/defense fetch now fails for the reason
+above, so it then falls back to the labelled benchmark (see below).
 
 ### What the pipeline does
 
-1. **Fetch** five player stat tables per league (standard, shooting,
-   passing, possession, defense) plus the team standard table for possession.
-2. **Flatten** FBref's two-level headers (`("Playing Time", "Min")` becomes
-   `"Playing Time_Min"`) and map them onto the platform's raw schema
-   (`src/data/fbref_transform.py`). Matching ignores case and spacing, and a
-   missing column raises a clear `FBrefSchemaError`.
-3. **Deduplicate mid-season transfers.** FBref's season tables list a
-   transferred player once per club, with no aggregate row and no dates, so:
-   counting stats are **summed** into season totals; the player is assigned to
-   the club where they played the **most minutes** (the tables cannot say which
-   club was "latest"); `Team_Possession_Pct` is the **minutes-weighted** average
-   of their clubs; and players are keyed by `(name, birth year)` so namesakes
-   are never merged.
-4. **Enrich** (`src/data/real_data_enricher.py`) with possession, market value
-   and contract expiry (see below).
+1. **Map** the snapshot onto the platform's raw schema
+   (`src/data/fbref_snapshot.py`). Two quirks of the export are handled
+   explicitly: `Avg Mins per Match` actually holds **season total** minutes
+   (its maximum is 3,420 = 38 × 90), and successful take-ons are rebuilt
+   from attempts × success rate. A missing column or a season mismatch
+   raises a clear `FBrefSchemaError`.
+2. **Attach possession** per club. FBref's squad table spells six clubs
+   differently from its player table (`Paris SG` vs `Paris S-G`, `Real
+   Betis` vs `Betis`, ...); an explicit alias map reconciles them, and all 96
+   clubs match.
+3. **Deduplicate mid-season transfers.** Season tables list a transferred
+   player once per club, with no aggregate row and no dates, so: counting
+   stats are **summed** into season totals; the player is assigned to the club
+   where they played the **most minutes** (the tables cannot say which club
+   was "latest"); `Team_Possession_Pct` is the **minutes-weighted** average of
+   their clubs; and players are keyed by `(name, birth year)` so namesakes
+   (two different Rodris) are never merged. Pass completion is recomputed from
+   the summed totals.
+4. **Enrich** (`src/data/real_data_enricher.py`) with market value and
+   contract expiry estimates (see below).
 5. **Write** `data/processed/real_players_2023_2024.parquet` and a `.csv` twin.
+
+The original live-scraping path (`scripts/ingest_fbref.py`,
+`src/data/fbref_transform.py`) is kept: it shares the deduplication code and
+will work again if FBref restores the tables.
+
+### Results on 2023-24
+
+Spot checks against the real season: Kane 36 league goals, Haaland 27,
+Mbappé 27, Palmer 22 goals and 11 assists, Rodri 92.0% pass completion;
+possession ranges from Metz (35.6%) to Manchester City and PSG (65.2%). With
+the default 900-minute filter, 1,497 outfield players are modelled (FW 360,
+MF 486, DF 651). Two PCA components explain 55% (FW), 58% (MF) and 52% (DF)
+of the variance with RobustScaler, and silhouette scores (about 0.16–0.19 at
+k = 4) are lower than on the synthetic data: real players form a continuum
+rather than the generator's tidy archetypes. A cosine search for Harry Kane
+returns Openda, Haaland, Saïd, Aubameyang, Mbappé, Lewandowski, Vlahović and
+Osimhen.
 
 `DataLoader().load_real("2023-2024")` then runs the file through **exactly the
 same pipeline** as every other source: validation, minutes filter, per-90,
@@ -509,10 +552,10 @@ for 2023-24), not from the synthetic database's 2026.
   cache key includes the file's path and modification time, so re-running the
   ingestion is picked up automatically.
 
-### Rate limits, CAPTCHAs and the fallback
+### Rate limits, CAPTCHAs and the fallback (`scripts/ingest_fbref.py`)
 
 FBref rate-limits automated traffic (HTTP 429) and may serve a CAPTCHA to
-automated browsers. The script never tries to bypass a CAPTCHA. Any fetch
+automated browsers. The live scraper never tries to bypass a CAPTCHA. Any fetch
 failure is caught, classified (rate limit, CAPTCHA or network) and logged, and
 the script then writes a **synthetic benchmark** with the identical schema to
 `data/processed/benchmark_players_2023_2024.parquet`, so the pipeline never
@@ -529,7 +572,9 @@ every later run offline.
 
 `data/` is git-ignored except for `data/processed/.gitkeep`. Processed files
 are local artefacts and FBref's terms of use do not permit redistributing its
-data. Check them, and those of any valuation source, before commercial use.
+data. The Kaggle snapshot is a copy of FBref data, so the same terms apply;
+check the dataset's own licence on Kaggle too. Both are fine for personal
+analysis; check them, and those of any valuation source, before commercial use.
 
 ### Uploading your own CSV
 
@@ -553,10 +598,11 @@ Counting stats are **season totals**; the pipeline converts them to per-90.
 playerscout/
 ├── app.py                         # Streamlit dashboard (UI only)
 ├── requirements.txt               # pinned runtime dependencies
-├── requirements-ingest.txt        # + soccerdata (real-data ingestion)
+├── requirements-ingest.txt        # + soccerdata, kagglehub (real-data ingestion)
 ├── requirements-dev.txt           # + ingestion + pytest
 ├── scripts/
-│   └── ingest_fbref.py            # FBref 2023-24 ingestion CLI with fallback
+│   ├── ingest_fbref_snapshot.py   # real 2023-24 data from the FBref snapshot
+│   └── ingest_fbref.py            # live FBref scraper (caches possession pages)
 ├── data/processed/                # generated parquet/csv (git-ignored)
 ├── .streamlit/config.toml         # dark theme
 ├── src/
@@ -565,6 +611,7 @@ playerscout/
 │   ├── pipeline.py                # orchestration used by app.py
 │   ├── data/
 │   │   ├── synthetic_generator.py # FBref-style synthetic season database
+│   │   ├── fbref_snapshot.py      # FBref snapshot -> raw schema, cached possession
 │   │   ├── fbref_transform.py     # FBref tables -> raw schema, transfer dedup
 │   │   ├── real_data_enricher.py  # possession, value & contract proxies
 │   │   └── loader.py              # validation, per-90, pAdj, league scaling, load_real
@@ -576,5 +623,5 @@ playerscout/
 │   │   └── similarity.py          # ScoutingSimilarityEngine
 │   └── visualization/
 │       └── plots.py               # dark-theme Matplotlib suite
-└── tests/                         # 285 tests (see above)
+└── tests/                         # 303 tests (see above)
 ```

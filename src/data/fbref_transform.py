@@ -187,10 +187,11 @@ def deduplicate_transfers(players: pd.DataFrame) -> tuple[pd.DataFrame, DedupRep
     keys = ["Player", "_born_key"]
     df = df.sort_values(keys + ["Minutes_Played"], ascending=[True, True, False], kind="mergesort")
     grouped = df.groupby(keys, sort=False)
+    summed = _present(df, SUMMED_COLUMNS)
 
     first = grouped.first()  # metadata from the most-minutes club
-    totals = grouped[list(SUMMED_COLUMNS)].sum()
-    merged = first.drop(columns=list(SUMMED_COLUMNS)).join(totals)
+    totals = grouped[summed].sum()
+    merged = first.drop(columns=summed).join(totals)
     merged["Clubs_In_Season"] = grouped["Squad"].nunique()
     if "Team_Possession_Pct" in df.columns:
         weights = df["Minutes_Played"].clip(lower=0) + 1e-9  # keep 0-minute rows defined
@@ -210,10 +211,15 @@ def finalize_counts(players: pd.DataFrame) -> pd.DataFrame:
     pct = np.zeros_like(attempted)
     np.divide(100.0 * completed, attempted, out=pct, where=attempted > 0)
     out["Pass_Completion_Pct"] = np.round(pct, 1)
-    for col in SUMMED_COLUMNS:
+    for col in _present(out, SUMMED_COLUMNS):
         if col != "Nineties":
             out[col] = out[col].round().astype(int)
     return out.sort_values(["League", "Squad", "Player"], ignore_index=True)
+
+
+def _present(df: pd.DataFrame, columns: tuple[str, ...]) -> list[str]:
+    """Columns of ``columns`` that ``df`` has (sources differ, e.g. no ``Starts``)."""
+    return [c for c in columns if c in df.columns]
 
 
 def build_raw_player_table(

@@ -209,3 +209,33 @@ def test_league_subset() -> None:
 def test_invalid_config_rejected(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         GeneratorConfig(**kwargs)
+
+
+def test_v14_stats_present_and_plausible() -> None:
+    from src.data.synthetic_generator import generate_synthetic_players
+
+    df = generate_synthetic_players()
+    assert (df["Non_Penalty_xG"] >= 0).all() and (df["Non_Penalty_xG"] <= df["Shots"] * 0.6 + 1e-9).all()
+    assert df["Aerial_Win_Pct"].between(10, 90).all()
+    assert (df["Progressive_Carries"] >= 0).all() and pd.api.types.is_integer_dtype(df["Progressive_Carries"])
+    by_group = df.assign(g=df["Position"].str[:2]).groupby("g")
+    assert by_group["Aerial_Win_Pct"].mean()["DF"] > by_group["Aerial_Win_Pct"].mean()["FW"]
+
+
+def test_v14_stats_do_not_change_existing_columns() -> None:
+    """The new stats use their own random stream, so perturbing it changes
+    only the new columns: every pre-existing column stays seed-stable."""
+    import numpy as np
+
+    from src.data.synthetic_generator import GeneratorConfig, SyntheticPlayerGenerator
+
+    class PerturbedExtraStream(SyntheticPlayerGenerator):
+        def _build_clubs(self, league: str):  # runs after generate() reset both streams
+            self._extra_rng = np.random.default_rng(999 + len(league))
+            return super()._build_clubs(league)
+
+    new_cols = ["Non_Penalty_xG", "Progressive_Carries", "Aerial_Win_Pct"]
+    base = SyntheticPlayerGenerator(GeneratorConfig(seed=7)).generate()
+    perturbed = PerturbedExtraStream(GeneratorConfig(seed=7)).generate()
+    pd.testing.assert_frame_equal(base.drop(columns=new_cols), perturbed.drop(columns=new_cols))
+    assert not base[new_cols].equals(perturbed[new_cols])

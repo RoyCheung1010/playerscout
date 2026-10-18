@@ -89,10 +89,17 @@ RAW_COUNT_COLUMNS: Final[tuple[str, ...]] = (
     "Successful_Take_Ons",
     "Tackles_Won",
     "Interceptions",
+    "Progressive_Carries",
 )
 
-# Rate stat delivered as a percentage, not converted to per-90.
-RAW_RATE_COLUMNS: Final[tuple[str, ...]] = ("Pass_Completion_Pct",)
+# Season-total volume stats that are not whole counts (expected goals).
+RAW_EXPECTED_COLUMNS: Final[tuple[str, ...]] = ("Non_Penalty_xG",)
+
+# Everything the loader converts to per-90.
+RAW_VOLUME_COLUMNS: Final[tuple[str, ...]] = RAW_COUNT_COLUMNS + RAW_EXPECTED_COLUMNS
+
+# Rate stats delivered as percentages, not converted to per-90.
+RAW_RATE_COLUMNS: Final[tuple[str, ...]] = ("Pass_Completion_Pct", "Aerial_Win_Pct")
 
 REQUIRED_RAW_COLUMNS: Final[tuple[str, ...]] = (
     METADATA_COLUMNS
@@ -106,6 +113,9 @@ REQUIRED_RAW_COLUMNS: Final[tuple[str, ...]] = (
         "Successful_Take_Ons",
         "Tackles_Won",
         "Interceptions",
+        "Non_Penalty_xG",
+        "Progressive_Carries",
+        "Aerial_Win_Pct",
     )
 )
 
@@ -115,38 +125,44 @@ REQUIRED_RAW_COLUMNS: Final[tuple[str, ...]] = (
 CORE_FEATURES: Final[tuple[str, ...]] = (
     "Goals_p90",
     "Shots_p90",
+    "Non_Penalty_xG_p90",
     "Assists_p90",
     "Key_Passes_p90",
     "Pass_Completion_Pct",
     "Progressive_Passes_p90",
     "Successful_Take_Ons_p90",
+    "Progressive_Carries_p90",
     "pAdj_Tackles_Won_p90",
     "pAdj_Interceptions_p90",
+    "Aerial_Win_Pct",
 )
 
 FEATURE_LABELS: Final[dict[str, str]] = {
     "Goals_p90": "Clinical Finishing",
     "Shots_p90": "Shot Volume",
+    "Non_Penalty_xG_p90": "Chance Quality",
     "Assists_p90": "Final-Ball Output",
     "Key_Passes_p90": "Chance Creation",
     "Pass_Completion_Pct": "Ball Retention",
     "Progressive_Passes_p90": "Line-Breaking Passing",
     "Successful_Take_Ons_p90": "1v1 Dribbling",
+    "Progressive_Carries_p90": "Ball Carrying",
     "pAdj_Tackles_Won_p90": "Ball Winning",
     "pAdj_Interceptions_p90": "Reading of Play",
+    "Aerial_Win_Pct": "Aerial Dominance",
 }
 
 # Feature categories drive both the composite indices and the similarity weights.
 FEATURE_CATEGORIES: Final[dict[str, tuple[str, ...]]] = {
-    "Scoring": ("Goals_p90", "Shots_p90"),
+    "Scoring": ("Goals_p90", "Shots_p90", "Non_Penalty_xG_p90"),
     "Creation & Passing": (
         "Assists_p90",
         "Key_Passes_p90",
         "Pass_Completion_Pct",
         "Progressive_Passes_p90",
     ),
-    "Dribbling": ("Successful_Take_Ons_p90",),
-    "Defending": ("pAdj_Tackles_Won_p90", "pAdj_Interceptions_p90"),
+    "Dribbling": ("Successful_Take_Ons_p90", "Progressive_Carries_p90"),
+    "Defending": ("pAdj_Tackles_Won_p90", "pAdj_Interceptions_p90", "Aerial_Win_Pct"),
 }
 
 # Per-90 defensive stats corrected for team possession (pAdj sigmoid).
@@ -186,6 +202,8 @@ CURRENT_SEASON_END_YEAR: Final[int] = 2026
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 PROCESSED_DATA_DIR: Final[Path] = PROJECT_ROOT / "data" / "processed"
 DEFAULT_REAL_SEASON: Final[str] = "2023-2024"
+# Real seasons with full advanced stats, oldest first; the newest is the default.
+REAL_SEASONS: Final[tuple[str, ...]] = ("2023-2024", "2024-2025")
 
 # soccerdata league id -> display name used throughout the platform.
 FBREF_LEAGUES: Final[dict[str, str]] = {

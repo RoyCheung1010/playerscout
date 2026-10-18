@@ -126,3 +126,23 @@ def test_cluster_traits_read_percentiles(processed_players: pd.DataFrame) -> Non
     prof = roles.percentile_profiles(model.cohort, model.labels, FEATURES)
     expected = " + ".join(pipeline.top_traits(prof[0]))
     assert summary.loc[summary.Cluster == 0, "Top Traits"].item() == expected
+
+
+def test_aerial_dominance_names_target_forwards_and_stoppers() -> None:
+    target = profile(Aerial_Win_Pct=92, Shots_p90=70, Non_Penalty_xG_p90=68, Successful_Take_Ons_p90=20,
+                     Progressive_Carries_p90=20, Pass_Completion_Pct=35)
+    labels = roles.positional_role_labels(np.vstack([target, STRIKER, WINGER]), FEATURES, "FW")
+    assert labels[0] == "Target Forward"
+    stopper = profile(Aerial_Win_Pct=90, pAdj_Interceptions_p90=85, Key_Passes_p90=20,
+                      Successful_Take_Ons_p90=20, Assists_p90=25, Progressive_Carries_p90=25)
+    labels = roles.positional_role_labels(np.vstack([stopper, BALL_PLAYING_CB, ATTACKING_FB]), FEATURES, "DF")
+    assert labels[0] == "Stopper Centre-Back"
+
+
+def test_carriers_and_progressive_playmakers_separated() -> None:
+    carrier = profile(Progressive_Carries_p90=97, Successful_Take_Ons_p90=95, Key_Passes_p90=75,
+                      Shots_p90=75, Pass_Completion_Pct=35, Aerial_Win_Pct=20)
+    playmaker = profile(Progressive_Passes_p90=92, Key_Passes_p90=85, Assists_p90=78, Pass_Completion_Pct=62)
+    winner = profile(pAdj_Tackles_Won_p90=88, pAdj_Interceptions_p90=85, Key_Passes_p90=35, Goals_p90=35)
+    labels = roles.positional_role_labels(np.vstack([carrier, playmaker, winner]), FEATURES, "MF")
+    assert labels == {0: "Ball-Carrying Midfielder", 1: "Progressive Playmaker", 2: "Ball-Winning Midfielder"}

@@ -31,7 +31,7 @@ from src.config import (
     CORE_FEATURES,
     DEFAULT_MIN_MINUTES,
     DEFAULT_PADJ_STEEPNESS,
-    DEFAULT_REAL_SEASON,
+    REAL_SEASONS,
     ORIGIN_BENCHMARK,
     POSITION_GROUPS,
     RANDOM_STATE,
@@ -51,7 +51,7 @@ from src.models.similarity import Metric
 from src.visualization import plots
 
 SYNTHETIC = "Synthetic Enterprise DB"
-REAL = "Real Data (2023-24 Top 5 European Leagues)"
+REAL = "Real Data (Top 5 European Leagues)"
 UPLOAD = "Upload Custom CSV"
 SCALERS: dict[str, ScalerType] = {"RobustScaler (IQR)": "robust", "StandardScaler (Z-score)": "standard"}
 METRICS: dict[str, Metric] = {
@@ -88,6 +88,7 @@ def load_dataset(
     padj_steepness: float,
     apply_league_scaling: bool,
     real_file_stamp: str | None = None,
+    season: str = REAL_SEASONS[-1],
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Ingest, adjust and percentile-rank the full database (all positions).
 
@@ -102,7 +103,7 @@ def load_dataset(
     if source_kind == UPLOAD:
         df = loader.load(io.BytesIO(file_bytes or b""))
     elif source_kind == REAL:
-        df = loader.load_real(DEFAULT_REAL_SEASON)
+        df = loader.load_real(season)
     else:
         df = loader.load(generator_config=GeneratorConfig(seed=seed, include_ground_truth=True))
     report = asdict(loader.last_report)
@@ -223,11 +224,17 @@ def describe_source(source: str, seed: int, file_bytes: bytes | None, real_stamp
     return f"Uploaded CSV ({len(file_bytes or b'') / 1024:,.0f} KB)"
 
 
-def show_real_data_missing() -> None:
+def season_label(season: str) -> str:
+    """``"2024-2025"`` -> ``"2024-25"``."""
+    return f"{season[:4]}-{season[-2:]}" if len(season) == 9 else season
+
+
+def show_real_data_missing(season: str = REAL_SEASONS[-1]) -> None:
     st.info(
-        "**Real data has not been ingested yet.**\n\n"
-        "Build it once from the FBref 2023-24 Top 5 snapshot (under a minute):\n\n"
-        "```bash\npip install -r requirements-ingest.txt\npython scripts/ingest_fbref_snapshot.py --download\n```\n\n"
+        f"**Real data for {season_label(season)} has not been ingested yet.**\n\n"
+        "Build every supported season once from the FBref Top 5 snapshots (about a minute):\n\n"
+        "```bash\npip install -r requirements-ingest.txt\n"
+        "python scripts/ingest_fbref_snapshot.py --download --season all\n```\n\n"
         "Team possession is read from FBref pages cached by `scripts/ingest_fbref.py`; without them "
         "it defaults to a neutral 50%. Switch to the Synthetic Enterprise DB in the meantime.",
         icon=":material/cloud_download:",
@@ -259,15 +266,24 @@ def show_provenance_banner(df: pd.DataFrame) -> None:
             )
         return
     contract_year = pipeline.contract_reference_year(df)
+    season = (season_label(str(df["Season"].mode().iloc[0]))
+              if "Season" in df.columns and not df["Season"].dropna().empty else None)
     notes = [
         f"**Market values:** {value_tm:.0%} Transfermarkt, as valued at the end of the season",
         f"**Contracts:** {contract_tm:.0%} Transfermarkt, as listed in {contract_year} "
-        "(years remaining count from then; the club may differ from the 2023-24 one)",
+        f"(years remaining count from then; the club may differ from the {season or 'stats'} one)",
     ]
     if value_proxy or contract_proxy:
         notes.append(f"The rest ({value_proxy:.0%} of values, {contract_proxy:.0%} of contracts) are "
                      "model estimates for players Transfermarkt could not match or no longer tracks.")
-    st.info("Real FBref performance data.\n\n" + "\n\n".join(notes), icon=":material/info:")
+    possession_est = pipeline.source_share(df, "Possession_Source", "estimated")
+    if possession_est:
+        rest = "." if possession_est >= 1.0 else "; the rest from FBref."
+        notes.append(f"**Team possession:** {possession_est:.0%} of players' clubs estimated from pass "
+                     f"volumes (calibrated on 2023-24, ±1.3 points on average){rest}")
+    st.info(f"Real FBref performance data ({season})." if season else "Real FBref performance data.",
+            icon=":material/info:")
+    st.info("\n\n".join(notes), icon=":material/fact_check:")
 
 
 def style_value_diff(value: float) -> str:
@@ -279,14 +295,25 @@ def style_value_diff(value: float) -> str:
 # --------------------------------------------------------------------------- #
 # Sidebar
 # --------------------------------------------------------------------------- #
-def sidebar_data_controls() -> tuple[str, bytes | None, int, int, float, bool]:
+def available_real_seasons() -> list[str]:
+    """Supported real seasons, newest first, those already ingested ahead of the rest."""
+    newest_first = list(reversed(REAL_SEASONS))
+    ready = [s for s in newest_first if find_real_dataset(s) is not None]
+    return ready + [s for s in newest_first if s not in ready]
+
+
+def sidebar_data_controls() -> tuple[str, bytes | None, int, int, float, bool, str]:
     with st.sidebar:
         st.header("Recruitment Filters")
         with st.expander("Data Source & Scope", expanded=True, icon=":material/database:"):
             source = st.radio("Data source", [SYNTHETIC, REAL, UPLOAD], key="source")
             file_bytes: bytes | None = None
             seed = RANDOM_STATE
-            if source == UPLOAD:
+            season = REAL_SEASONS[-1]
+            if source == REAL:
+                season = st.selectbox("Season", available_real_seasons(), format_func=season_label,
+                                      key="real_season", help="Seasons with full FBref advanced stats.")
+            elif source == UPLOAD:
                 uploaded = st.file_uploader("Player season CSV (FBref-style)", type=["csv"])
                 file_bytes = uploaded.getvalue() if uploaded is not None else None
             elif source == SYNTHETIC:
@@ -296,7 +323,7 @@ def sidebar_data_controls() -> tuple[str, bytes | None, int, int, float, bool]:
             padj = st.slider("Possession adjustment steepness (k)", 0.0, 0.15, DEFAULT_PADJ_STEEPNESS,
                              step=0.01, help="0 disables pAdj. 0.05 ≈ 1.25× at 60% possession.")
             league_scaling = st.toggle("Apply league strength coefficients", value=True)
-    return source, file_bytes, seed, min_minutes, padj, league_scaling
+    return source, file_bytes, seed, min_minutes, padj, league_scaling, season
 
 
 def sidebar_model_controls(df: pd.DataFrame, reference_year: int) -> dict[str, object]:
@@ -534,7 +561,7 @@ def tab_diagnostics(
 # --------------------------------------------------------------------------- #
 def main() -> None:
     inject_css()
-    source, file_bytes, seed, min_minutes, padj, league_scaling = sidebar_data_controls()
+    source, file_bytes, seed, min_minutes, padj, league_scaling, season = sidebar_data_controls()
 
     if source == UPLOAD and file_bytes is None:
         st.info("Upload an FBref-style season CSV in the sidebar to begin. The template below shows the "
@@ -547,16 +574,16 @@ def main() -> None:
 
     real_stamp: str | None = None
     if source == REAL:
-        dataset = find_real_dataset(DEFAULT_REAL_SEASON)
+        dataset = find_real_dataset(season)
         if dataset is None:
-            show_real_data_missing()
+            show_real_data_missing(season)
             st.stop()
         real_stamp = f"{dataset.path}|{dataset.path.stat().st_mtime_ns}"
 
     try:
-        df, report = load_dataset(source, file_bytes, seed, min_minutes, padj, league_scaling, real_stamp)
+        df, report = load_dataset(source, file_bytes, seed, min_minutes, padj, league_scaling, real_stamp, season)
     except RealDataNotFoundError:
-        show_real_data_missing()
+        show_real_data_missing(season)
         st.stop()
     except DataValidationError as exc:
         st.error(f"Could not load the uploaded file: {exc}", icon=":material/error:")

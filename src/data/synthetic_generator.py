@@ -226,6 +226,24 @@ ARCHETYPES: Final[tuple[Archetype, ...]] = (
               3.0, 7.00, 0.48, 0.60, 0.30, (("FW,MF", 0.6), ("FW", 0.4)), 20.0),
 )
 
+# Per-archetype profile for the stats added in v1.4, at average talent:
+# (progressive carries per 90, aerial duel win %, npxG per shot).
+# They are drawn from a separate random stream (see ``_extra_rng``) so that
+# adding them left every pre-existing column identical for a given seed.
+EXTRA_PROFILES: Final[dict[str, tuple[float, float, float]]] = {
+    "Ball-Playing Centre-Back": (1.40, 63.0, 0.09),
+    "Stopper Centre-Back": (0.55, 68.0, 0.10),
+    "Attacking Full-Back": (2.30, 45.0, 0.06),
+    "Deep-Lying Playmaker": (1.30, 48.0, 0.06),
+    "Defensive Destroyer": (0.90, 56.0, 0.06),
+    "Box-to-Box Engine": (2.00, 50.0, 0.09),
+    "Advanced Creator": (2.40, 37.0, 0.10),
+    "Penalty-Box Poacher": (0.80, 42.0, 0.15),
+    "Pressing Target Forward": (0.90, 56.0, 0.12),
+    "Inside Forward": (3.30, 30.0, 0.11),
+    "Touchline Dribbler": (3.80, 28.0, 0.09),
+}
+
 # Outfield squad slots generated per club, by position group.
 GROUP_SLOTS: Final[dict[str, int]] = {"DF": 5, "MF": 5, "FW": 4}
 
@@ -283,6 +301,7 @@ class SyntheticPlayerGenerator:
     def __init__(self, config: GeneratorConfig | None = None) -> None:
         self.config = config or GeneratorConfig()
         self._rng = np.random.default_rng(self.config.seed)
+        self._extra_rng = np.random.default_rng([self.config.seed, 14])
         self._used_names: set[str] = set()
         self._archetypes_by_group: dict[str, list[Archetype]] = {
             group: [a for a in ARCHETYPES if a.group == group] for group in GROUP_SLOTS
@@ -295,6 +314,7 @@ class SyntheticPlayerGenerator:
         """Return one row per player with raw season totals and metadata."""
         # Reset state so repeated calls on the same instance are identical.
         self._rng = np.random.default_rng(self.config.seed)
+        self._extra_rng = np.random.default_rng([self.config.seed, 14])
         self._used_names = set()
 
         rows: list[dict[str, object]] = []
@@ -392,6 +412,16 @@ class SyntheticPlayerGenerator:
         tackles_won = int(rng.poisson(rate(archetype.tackles_won_p90, def_mult) * nineties))
         interceptions = int(rng.poisson(rate(archetype.interceptions_p90, def_mult) * nineties))
 
+        # --- v1.4 stats (separate stream: earlier columns stay seed-stable) --
+        xrng = self._extra_rng
+        carries_p90, aerial_base, xg_per_shot = EXTRA_PROFILES[archetype.name]
+        progressive_carries = int(xrng.poisson(
+            carries_p90 * attack_mult * float(np.exp(xrng.normal(0.0, 0.22))) * nineties
+        ))
+        aerial_win_pct = round(float(np.clip(aerial_base + 2.5 * talent + xrng.normal(0.0, 6.0), 10.0, 90.0)), 1)
+        # Shot quality tracks the finishing profile, without the finishing luck.
+        npxg = round(shots * xg_per_shot * float(np.exp(0.08 * talent + xrng.normal(0.0, 0.10))), 1)
+
         contract_expiry = self._sample_contract_expiry(age)
         market_value = self._market_value(archetype, club, talent, age, contract_expiry, minutes)
         nation = self._sample_nation(club.league)
@@ -421,6 +451,9 @@ class SyntheticPlayerGenerator:
             "Successful_Take_Ons": successful_take_ons,
             "Tackles_Won": tackles_won,
             "Interceptions": interceptions,
+            "Non_Penalty_xG": npxg,
+            "Progressive_Carries": progressive_carries,
+            "Aerial_Win_Pct": aerial_win_pct,
             "Team_Possession_Pct": club.possession_pct,
             "Market_Value_EUR_M": market_value,
             "Contract_Expiry_Year": contract_expiry,

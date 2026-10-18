@@ -104,6 +104,8 @@ def row(df: pd.DataFrame, player: str, squad: str | None = None) -> pd.Series:
         ("Gabriel Magalhães", "Gabriel"),
         ("Nacho", "Nacho Fernández"),
         ("Przemysław Frankowski", "Przemyslaw Frankowski"),
+        ("Valentín Castellanos", "Taty Castellanos"),
+        ("Obite N'Dicka", "Evan Ndicka"),
     ],
 )
 def test_names_compatible_accepts_known_variants(ours: str, theirs: str) -> None:
@@ -120,7 +122,8 @@ def test_names_compatible_rejects_different_players(ours: str, theirs: str) -> N
 
 def test_name_key_strips_accents_and_punctuation() -> None:
     assert tm.name_key("Pierre-Emile Højbjerg") == "pierre emile hjbjerg"
-    assert tm.name_key("N'Golo  Kanté") == "n golo kante"
+    assert tm.name_key("N'Golo  Kanté") == "ngolo kante"
+    assert tm.name_key("Obite N'Dicka") == "obite ndicka"
 
 
 # --------------------------------------------------------------------------- #
@@ -222,3 +225,39 @@ def test_read_transfermarkt_requires_both_files(tmp_path) -> None:
     TM_VALUATIONS.to_csv(tmp_path / "player_valuations.csv", index=False)
     players, valuations = tm.read_transfermarkt(tmp_path)
     assert len(players) == len(TM_PLAYERS) and len(valuations) == len(TM_VALUATIONS)
+
+
+def test_exact_name_one_year_apart_matches_only_when_unique() -> None:
+    ours = pd.DataFrame({"Player": ["Leif Davis", "Common Name"], "Born": [2000, 1995],
+                         "League": ["Premier League", "Serie A"]})
+    facts = pd.DataFrame({
+        "player_id": [11, 12, 13], "key": ["leif davis", "common name", "common name"],
+        "born": [1999, 1994, 1996], "league": ["Premier League", "Serie A", "Serie A"],
+        "value_eur_m": [22.0, 1.0, 2.0], "contract_year": [2028, 2027, 2027], "last_season": [2025] * 3,
+    })
+    matched = tm.match_players(ours, facts)
+    assert matched.loc[0, "player_id"] == 11  # unique namesake born a year earlier
+    assert pd.isna(matched.loc[1, "player_id"])  # two candidates a year either side: ambiguous
+
+
+def test_surname_only_match_requires_same_club() -> None:
+    facts = pd.DataFrame({
+        "player_id": [21, 22], "key": ["taty castellanos", "ivan romero"], "born": [1998, 2001],
+        "league": ["Serie A", "La Liga"], "club": ["SS Lazio", "Sevilla FC"],
+        "value_eur_m": [25.0, 8.0], "contract_year": [2028, 2027], "last_season": [2025, 2025],
+    })
+    ours = pd.DataFrame({"Player": ["Valentín Castellanos", "Carlos Romero"], "Born": [1998, 2001],
+                         "League": ["Serie A", "La Liga"], "Squad": ["Lazio", "Villarreal"]})
+    matched = tm.match_players(ours, facts)
+    assert matched.loc[0, "player_id"] == 21  # same surname and club: the same player
+    assert pd.isna(matched.loc[1, "player_id"])  # same surname, different club: not him
+
+
+@pytest.mark.parametrize(
+    ("ours", "theirs", "same"),
+    [("Wolves", "Wolverhampton Wanderers", True), ("Paris S-G", "Paris Saint-Germain", True),
+     ("Inter", "FC Internazionale Milano", True), ("Nott'ham Forest", "Nottingham Forest", True),
+     ("Villarreal", "Sevilla FC", False), ("Ipswich Town", "Coventry City", False), ("Lazio", None, False)],
+)
+def test_clubs_match(ours: str, theirs: str | None, same: bool) -> None:
+    assert tm.clubs_match(ours, theirs) is same

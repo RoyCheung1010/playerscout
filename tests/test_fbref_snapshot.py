@@ -63,6 +63,10 @@ def make_snapshot() -> pd.DataFrame:
     df.insert(0, "rk", range(1, len(df) + 1))
     df.insert(2, "nation", "Somewhere")
     df["Expected Goals"] = 0.0  # extra export columns must be ignored
+    df["Exp NPG"] = (df["Total Shots"] * 0.11).round(1)
+    df["Progressive Carries"] = df["Take ons attempted"] // 2
+    # Aerial win rate; blank (no duels) for the keeper, as FBref leaves it.
+    df["% Aerial Duels won"] = [None if p == "GK" else 40.0 + 3 * (i % 7) for i, p in enumerate(df["pos"])]
     df["season"] = SEASON
     return df
 
@@ -225,7 +229,7 @@ def test_script_writes_real_dataset(tmp_path: Path, snapshot: pd.DataFrame) -> N
     snapshot.to_csv(csv, index=False)
     cache = write_cache(tmp_path / "FBref")
     out = tmp_path / "processed"
-    code = module.main(["--csv", str(csv), "--fbref-cache", str(cache), "--out-dir", str(out)])
+    code = module.main(["--csv", str(csv), "--season", SEASON, "--fbref-cache", str(cache), "--out-dir", str(out)])
     assert code == 0
     written = pd.read_parquet(out / "real_players_2023_2024.parquet")
     assert len(written) == len(snapshot) - 1  # Dier's two clubs merged
@@ -237,10 +241,12 @@ def test_script_without_possession_cache_still_succeeds(tmp_path: Path, snapshot
     module = _load_script()
     csv = tmp_path / "s.csv"
     snapshot.to_csv(csv, index=False)
-    code = module.main(["--csv", str(csv), "--fbref-cache", str(tmp_path / "none"), "--out-dir", str(tmp_path)])
+    code = module.main(["--csv", str(csv), "--season", SEASON, "--fbref-cache", str(tmp_path / "none"),
+                        "--out-dir", str(tmp_path)])
     assert code == 0
     written = pd.read_parquet(tmp_path / "real_players_2023_2024.parquet")
-    assert (written["Team_Possession_Pct"] == 50.0).all()  # neutral pAdj, logged as a warning
+    assert (written["Possession_Source"] == "estimated").all()  # pass-share estimate, not a flat 50%
+    assert written["Team_Possession_Pct"].between(30, 75).all()
 
 
 def test_script_fails_cleanly_and_writes_nothing(tmp_path: Path) -> None:
@@ -267,7 +273,7 @@ def test_script_attaches_transfermarkt(tmp_path: Path, snapshot: pd.DataFrame) -
         "player_id": [1, 1], "date": ["2024-06-01", "2026-06-12"], "market_value_in_eur": [100_000_000, 70_000_000],
         "player_club_domestic_competition_id": ["L1", "L1"],
     }).to_csv(tm_dir / "player_valuations.csv", index=False)
-    code = module.main(["--csv", str(csv), "--fbref-cache", str(write_cache(tmp_path / "FBref")),
+    code = module.main(["--csv", str(csv), "--season", SEASON, "--fbref-cache", str(write_cache(tmp_path / "FBref")),
                         "--transfermarkt", str(tm_dir), "--out-dir", str(tmp_path / "out")])
     assert code == 0
     written = pd.read_parquet(tmp_path / "out" / "real_players_2023_2024.parquet")
@@ -277,3 +283,91 @@ def test_script_attaches_transfermarkt(tmp_path: Path, snapshot: pd.DataFrame) -
     assert (written["Contract_Reference_Year"] == 2026).all()
     others = written[written.Player != "Harry Kane"]
     assert (others["Market_Value_Source"] == "proxy").all()
+
+
+
+# --------------------------------------------------------------------------- #
+# New stats (v1.4)
+# --------------------------------------------------------------------------- #
+def test_new_stats_mapped_and_summed_across_transfers(built: pd.DataFrame) -> None:
+    dier = built[built.Player == "Eric Dier"].iloc[0]
+    assert dier["Non_Penalty_xG"] == pytest.approx(round(1 * 0.11, 1) + round(6 * 0.11, 1))
+    assert dier["Progressive_Carries"] == 0 + 1  # (0 // 2) + (2 // 2)
+    assert built["Aerial_Win_Pct"].between(0, 100).all() and built["Aerial_Win_Pct"].notna().all()
+
+
+def test_missing_aerial_rate_filled_from_position_median(snapshot: pd.DataFrame) -> None:
+    raw = snap.snapshot_to_raw(snapshot)
+    keeper = raw[raw.Position == "GK"].iloc[0]
+    assert 0 <= keeper["Aerial_Win_Pct"] <= 100  # no other GK: overall median
+
+
+# --------------------------------------------------------------------------- #
+# 2024-25 export layout (FBref column codes)
+# --------------------------------------------------------------------------- #
+def make_big5() -> pd.DataFrame:
+    """Rows shaped like hubertsidorowicz/football-players-stats-2024-2025."""
+    return pd.DataFrame({
+        "Rk": [1, 2, 3], "Player": ["Mohamed Salah", "Max Aarons", "Max Aarons"],
+        "Nation": ["eg EGY", "eng ENG", "eng ENG"], "Pos": ["FW", "DF", "DF,MF"],
+        "Squad": ["Liverpool", "Bournemouth", "Valencia"],
+        "Comp": ["eng Premier League", "eng Premier League", "es La Liga"],
+        "Age": [32.0, 24.0, 24.0], "Born": [1992.0, 2000.0, 2000.0], "MP": [38, 3, 4], "Starts": [38, 1, 1],
+        "Min": [3371, 86, 120], "90s": [37.5, 1.0, 1.3], "Gls": [29, 0, 0], "Ast": [18, 0, 0],
+        "Sh": [130, 1, 0], "Cmp": [892, 40, 60], "Att": [1263, 50, 70], "Cmp%": [70.6, 80.0, 85.7],
+        "KP": [88, 1, 0], "PrgP": [140, 3, 4], "Att_stats_possession": [137, 2, 1], "Succ": [58, 1, 0],
+        "TklW": [11, 2, 3], "Int": [9, 1, 2], "npxG": [18.2, 0.1, 0.0], "PrgC": [154, 2, 3],
+        "Won%": [39.1, None, 50.0], "Att_stats_defense": [30, 5, 6],  # same code, other table: ignored
+    })
+
+
+def test_big5_format_detected_and_mapped() -> None:
+    frame = make_big5()
+    assert snap.detect_format(frame).name == "fbref-big5"
+    raw = snap.snapshot_to_raw(frame, "2024-2025")
+    salah = raw[raw.Player == "Mohamed Salah"].iloc[0]
+    assert (salah["League"], salah["Nation"], salah["Season"]) == ("Premier League", "EGY", "2024-2025")
+    assert (salah["Passes_Attempted"], salah["Take_Ons_Attempted"], salah["Successful_Take_Ons"]) == (1263, 137, 58)
+    assert (salah["Non_Penalty_xG"], salah["Progressive_Carries"], salah["Aerial_Win_Pct"]) == (18.2, 154, 39.1)
+
+
+def test_big5_transfer_across_leagues_merged() -> None:
+    raw, report = snap.build_snapshot_dataset(make_big5(), None, "2024-2025")
+    aarons = raw[raw.Player == "Max Aarons"].iloc[0]
+    assert report.n_transferred == 1
+    assert aarons["Squad"] == "Valencia" and aarons["Minutes_Played"] == 206  # most-minutes club, summed
+
+
+def test_unknown_layout_raises() -> None:
+    with pytest.raises(FBrefSchemaError, match="unrecognised"):
+        snap.detect_format(pd.DataFrame({"Player": ["x"], "Min": [90]}))
+
+
+# --------------------------------------------------------------------------- #
+# Possession estimate
+# --------------------------------------------------------------------------- #
+def test_possession_estimate_orders_clubs_by_pass_share() -> None:
+    raw = pd.DataFrame({
+        "League": ["L"] * 4, "Squad": ["Dominant", "Average", "Average2", "Deep"],
+        "Passes_Attempted": [24000, 16000, 16000, 10000],
+    })
+    est = snap.estimate_possession(raw).set_index("Squad")["Team_Possession_Pct"]
+    assert est["Dominant"] > est["Average"] > est["Deep"]
+    assert est["Average"] == pytest.approx(est["Average2"])
+    assert est.between(30, 75).all()
+
+
+def test_possession_calibration_stretches_around_fifty() -> None:
+    raw = pd.DataFrame({"League": ["L", "L"], "Squad": ["A", "B"], "Passes_Attempted": [600, 400]})
+    flat = snap.estimate_possession(raw, slope=1.0).set_index("Squad")["Team_Possession_Pct"]
+    cal = snap.estimate_possession(raw).set_index("Squad")["Team_Possession_Pct"]
+    assert flat["A"] == pytest.approx(60.0)
+    assert cal["A"] == pytest.approx(50 + snap.POSSESSION_CALIBRATION_SLOPE * 10, abs=0.05)
+
+
+def test_cached_possession_preferred_and_labelled(snapshot: pd.DataFrame, possession: pd.DataFrame) -> None:
+    partial = possession[possession.Squad != "Milan"]
+    raw, _ = snap.build_snapshot_dataset(snapshot, partial, SEASON)
+    by_club = raw.drop_duplicates("Squad").set_index("Squad")["Possession_Source"]
+    assert by_club["Bayern Munich"] == "fbref" and by_club["Milan"] == "estimated"
+    assert raw.loc[raw.Squad == "Bayern Munich", "Team_Possession_Pct"].iloc[0] == 61.3

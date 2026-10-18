@@ -21,7 +21,7 @@ import pandas as pd
 from src.config import FBREF_LEAGUES
 
 # Stat tables pulled per league (soccerdata ``stat_type`` names).
-PLAYER_STAT_TABLES: tuple[str, ...] = ("standard", "shooting", "passing", "possession", "defense")
+PLAYER_STAT_TABLES: tuple[str, ...] = ("standard", "shooting", "passing", "possession", "defense", "misc")
 
 INDEX_COLUMNS: tuple[str, ...] = ("league", "season", "team", "player")
 
@@ -39,6 +39,8 @@ COLUMN_MAP: dict[str, dict[str, str]] = {
         "playing time_90s": "Nineties",
         "performance_gls": "Goals",
         "performance_ast": "Assists",
+        "expected_npxg": "Non_Penalty_xG",
+        "progression_prgc": "Progressive_Carries",
     },
     "shooting": {"standard_sh": "Shots"},
     "passing": {
@@ -55,6 +57,7 @@ COLUMN_MAP: dict[str, dict[str, str]] = {
         "tackles_tklw": "Tackles_Won",
         "int": "Interceptions",
     },
+    "misc": {"aerial duels_won%": "Aerial_Win_Pct"},
 }
 
 # Season-total counts: summed across clubs for mid-season transfers.
@@ -62,7 +65,14 @@ SUMMED_COLUMNS: tuple[str, ...] = (
     "Matches_Played", "Starts", "Minutes_Played", "Nineties", "Goals", "Assists", "Shots",
     "Passes_Completed", "Passes_Attempted", "Key_Passes", "Progressive_Passes",
     "Take_Ons_Attempted", "Successful_Take_Ons", "Tackles_Won", "Interceptions",
+    "Progressive_Carries", "Non_Penalty_xG",
 )
+
+# Season totals that are not whole numbers (kept as floats).
+FLOAT_SUMMED_COLUMNS: tuple[str, ...] = ("Nineties", "Non_Penalty_xG")
+
+# Percentages averaged across a transferred player's clubs, weighted by minutes.
+WEIGHTED_RATE_COLUMNS: tuple[str, ...] = ("Team_Possession_Pct", "Aerial_Win_Pct")
 
 
 class FBrefSchemaError(ValueError):
@@ -160,6 +170,7 @@ def merge_player_tables(tables: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
     assert merged is not None
     for col in SUMMED_COLUMNS:
         merged[col] = to_number(merged[col]).fillna(0.0)
+    merged["Aerial_Win_Pct"] = fill_rate_gaps(merged, "Aerial_Win_Pct")
     merged["Age"] = parse_age(merged["Age"])
     merged["Born"] = to_number(merged["Born"])
     merged["Position"] = merged["Position"].fillna("").astype(str)
@@ -178,8 +189,8 @@ def deduplicate_transfers(players: pd.DataFrame) -> tuple[pd.DataFrame, DedupRep
     * counting stats are **summed** across clubs;
     * the player is assigned to the club where they played the **most minutes**
       (season tables cannot say which club was "latest");
-    * ``Team_Possession_Pct``, if present, is the **minutes-weighted** average
-      of the clubs' possession, since that is the context the stats came from;
+    * ``Team_Possession_Pct`` and ``Aerial_Win_Pct``, if present, are
+      **minutes-weighted** averages across the clubs;
     * players are keyed by ``(Player, Born)`` so namesakes are never merged.
     """
     df = players.copy()
@@ -193,10 +204,11 @@ def deduplicate_transfers(players: pd.DataFrame) -> tuple[pd.DataFrame, DedupRep
     totals = grouped[summed].sum()
     merged = first.drop(columns=summed).join(totals)
     merged["Clubs_In_Season"] = grouped["Squad"].nunique()
-    if "Team_Possession_Pct" in df.columns:
-        weights = df["Minutes_Played"].clip(lower=0) + 1e-9  # keep 0-minute rows defined
-        weighted = (df["Team_Possession_Pct"] * weights).groupby([df[k] for k in keys], sort=False).sum()
-        merged["Team_Possession_Pct"] = (weighted / weights.groupby([df[k] for k in keys], sort=False).sum()).round(1)
+    weights = df["Minutes_Played"].clip(lower=0) + 1e-9  # keep 0-minute rows defined
+    total_weight = weights.groupby([df[k] for k in keys], sort=False).sum()
+    for col in _present(df, WEIGHTED_RATE_COLUMNS):
+        weighted = (df[col] * weights).groupby([df[k] for k in keys], sort=False).sum()
+        merged[col] = (weighted / total_weight).round(1)
 
     out = merged.reset_index().drop(columns=["_born_key"])
     n_transferred = int((out["Clubs_In_Season"] > 1).sum())
@@ -212,9 +224,22 @@ def finalize_counts(players: pd.DataFrame) -> pd.DataFrame:
     np.divide(100.0 * completed, attempted, out=pct, where=attempted > 0)
     out["Pass_Completion_Pct"] = np.round(pct, 1)
     for col in _present(out, SUMMED_COLUMNS):
-        if col != "Nineties":
+        if col in FLOAT_SUMMED_COLUMNS:
+            out[col] = out[col].round(1)
+        else:
             out[col] = out[col].round().astype(int)
     return out.sort_values(["League", "Squad", "Player"], ignore_index=True)
+
+
+def fill_rate_gaps(players: pd.DataFrame, column: str) -> pd.Series:
+    """Fill a missing rate (FBref leaves it blank with no attempts, e.g. no
+    aerial duels) with the median of the player's primary position group,
+    then the overall median, then 50%."""
+    rate = to_number(players[column]) if column in players.columns else pd.Series(np.nan, index=players.index)
+    group = players["Position"].astype(str).str.upper().str.extract(r"(GK|DF|MF|FW)")[0]
+    by_group = rate.groupby(group).transform("median")
+    overall = rate.median()
+    return rate.fillna(by_group).fillna(50.0 if pd.isna(overall) else overall).clip(0.0, 100.0)
 
 
 def _present(df: pd.DataFrame, columns: tuple[str, ...]) -> list[str]:

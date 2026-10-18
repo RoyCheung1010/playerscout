@@ -147,11 +147,11 @@ def test_default_weights_are_ones(engine: ScoutingSimilarityEngine) -> None:
 def test_category_weights_expand_to_features(engine: ScoutingSimilarityEngine) -> None:
     w = engine.feature_weight_vector({"Scoring": 3.0, "Creation": 0.5, "Defending": 0.0})
     expected = {
-        "Goals_p90": 3.0, "Shots_p90": 3.0,
+        "Goals_p90": 3.0, "Shots_p90": 3.0, "Non_Penalty_xG_p90": 3.0,
         "Assists_p90": 0.5, "Key_Passes_p90": 0.5, "Pass_Completion_Pct": 0.5,
         "Progressive_Passes_p90": 0.5,
-        "Successful_Take_Ons_p90": 1.0,
-        "pAdj_Tackles_Won_p90": 0.0, "pAdj_Interceptions_p90": 0.0,
+        "Successful_Take_Ons_p90": 1.0, "Progressive_Carries_p90": 1.0,
+        "pAdj_Tackles_Won_p90": 0.0, "pAdj_Interceptions_p90": 0.0, "Aerial_Win_Pct": 0.0,
     }
     np.testing.assert_array_equal(w, [expected[f] for f in FEATURES])
 

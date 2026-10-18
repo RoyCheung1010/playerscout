@@ -155,7 +155,8 @@ def proxy_contract_expiry(players: pd.DataFrame, years: tuple[int, int] = CONTRA
         raise ValueError("contract year window is empty")
     span = high - low + 1
     born = players["Born"] if "Born" in players.columns else pd.Series("", index=players.index)
-    keys = players["Player"].astype(str) + "|" + born.astype(str)
+    # Missing names/birth years hash as "" / "-1" (unchanged keys for everyone else).
+    keys = players["Player"].fillna("").astype(str) + "|" + born.fillna(-1).astype(str)
     return keys.map(lambda k: low + int(hashlib.sha256(k.encode("utf-8")).hexdigest(), 16) % span).astype(int)
 
 

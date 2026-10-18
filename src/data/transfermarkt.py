@@ -22,9 +22,11 @@ Rules:
 * Anything unmatched keeps the enricher's proxy, labelled ``"proxy"``.
 
 Matching FBref players to Transfermarkt is done in two passes, both requiring
-the same **birth year**: (1) identical normalised name; (2) a conservative
-fuzzy name rule restricted to players valued in the **same league** during
-the season. Ambiguous matches are left unmatched rather than guessed.
+the same **birth year**: (1) identical normalised name (or, if no one of
+that name shares the birth year, a unique namesake born one year either
+side); (2) a conservative fuzzy name rule restricted to players valued in
+the **same league** during the season. Ambiguous matches are left unmatched
+rather than guessed.
 """
 
 from __future__ import annotations
@@ -101,7 +103,8 @@ def read_transfermarkt(folder: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     )
     valuations = pd.read_csv(
         folder / "player_valuations.csv",
-        usecols=["player_id", "date", "market_value_in_eur", "player_club_domestic_competition_id"],
+        usecols=lambda c: c in {"player_id", "date", "market_value_in_eur",
+                                "player_club_domestic_competition_id", "current_club_name"},
     )
     return players, valuations
 
@@ -110,11 +113,45 @@ def read_transfermarkt(folder: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 # Names
 # --------------------------------------------------------------------------- #
 def name_key(name: object) -> str:
-    """Accent-free, lower-case, punctuation-free name (``"Álex Grimaldo"`` -> ``"alex grimaldo"``)."""
+    """Accent-free, lower-case, punctuation-free name (``"Álex Grimaldo"`` -> ``"alex grimaldo"``).
+
+    Apostrophes are dropped (``"N'Dicka"`` -> ``"ndicka"``, matching
+    Transfermarkt's ``"Ndicka"``); hyphens and dots separate tokens.
+    """
     text = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode().lower()
-    for ch in "-.'’":
+    for ch in "'’":
+        text = text.replace(ch, "")
+    for ch in "-.":
         text = text.replace(ch, " ")
     return " ".join(text.split())
+
+
+_CLUB_STOPWORDS = frozenset({
+    "fc", "cf", "ac", "as", "ss", "sc", "rc", "cd", "ud", "sd", "afc", "ssc", "acf", "us", "ogc", "vfb",
+    "vfl", "tsg", "sv", "fsv", "bv", "rb", "de", "la", "del", "club", "calcio", "football", "futbol",
+    "spa", "sad", "1899", "1900", "1904", "1907", "1909", "04", "05", "09", "1846", "1848",
+})
+
+
+def clubs_match(ours: object, theirs: object) -> bool:
+    """Loose club-name agreement across sources (``"Wolves"`` ~ ``"Wolverhampton
+    Wanderers"``, ``"Paris S-G"`` ~ ``"Paris Saint-Germain"``). Unknown -> False."""
+    if pd.isna(ours) or pd.isna(theirs):
+        return False
+    a = [t for t in name_key(ours).split() if t not in _CLUB_STOPWORDS]
+    b = [t for t in name_key(theirs).split() if t not in _CLUB_STOPWORDS]
+    return any(x.startswith(y) or y.startswith(x) or (len(x) >= 4 and len(y) >= 4 and x[:4] == y[:4])
+               for x in a for y in b)
+
+
+def surname_only(a: str, b: str) -> bool:
+    """Two multi-token keys sharing only a surname of 5+ letters, with first
+    names that are not variants of each other (``"carlos romero"`` vs ``"ivan romero"``)."""
+    ta, tb = a.split(), b.split()
+    if len(ta) < 2 or len(tb) < 2 or ta[-1] != tb[-1] or len(ta[-1]) < 5:
+        return False
+    first_related = ta[0].startswith(tb[0]) or tb[0].startswith(ta[0]) or ta[0][:3] == tb[0][:3]
+    return not (first_related or set(ta) <= set(tb) or set(tb) <= set(ta))
 
 
 def names_compatible(a: str, b: str) -> bool:
@@ -143,6 +180,11 @@ def names_compatible(a: str, b: str) -> bool:
     short, long_ = (ta, tb) if len(ta) < len(tb) else (tb, ta)
     if len(short) == 1 and len(short[0]) >= 4 and short[0] in (long_[0], long_[-1]):
         return True
+    # Same surname, different first name or nickname ("valentin castellanos"
+    # vs "taty castellanos"). Common surnames make this unsafe on its own, so
+    # match_players only accepts it when the club matches too.
+    if surname_only(a, b):
+        return True
     return SequenceMatcher(None, a, b).ratio() >= FUZZY_RATIO
 
 
@@ -163,6 +205,9 @@ def season_facts(players: pd.DataFrame, valuations: pd.DataFrame, window: Season
     latest = pd.DataFrame({
         "player_id": v["player_id"].to_numpy(),
         "league": v["player_club_domestic_competition_id"].map(TM_LEAGUES).to_numpy(),
+        # Club at that valuation (optional column): confirms surname-only matches.
+        "club": (v["current_club_name"] if "current_club_name" in v.columns
+                 else pd.Series(pd.NA, index=v.index)).to_numpy(),
         "value_eur_m": (pd.to_numeric(v["market_value_in_eur"], errors="coerce") / 1e6).round(1).to_numpy(),
     })
     p = players.copy()
@@ -203,10 +248,19 @@ def match_players(ours: pd.DataFrame, facts: pd.DataFrame) -> pd.DataFrame:
                 exact = exact[exact["league"] == league]
             if len(exact) == 1:
                 pid, method = exact["player_id"].iloc[0], "exact"
+        if pid is None and exact is None:
+            # Birth years differ by one between sources around New Year
+            # (Leif Davis: 31 Dec 1999 vs 2000). Exact name, unique candidate only.
+            near = [g for year in (b - 1, b + 1) if (g := by_born_key.get((year, k))) is not None]
+            near_df = pd.concat(near) if near else None
+            if near_df is not None and len(near_df) == 1:
+                pid, method = near_df["player_id"].iloc[0], "exact"
         if pid is None and (b, league) in by_born_league:
             pool = by_born_league[(b, league)]
             hits = pool[pool["key"].map(lambda c: names_compatible(k, c))]
-            if len(hits) == 1:
+            squad = ours.at[idx, "Squad"] if "Squad" in ours.columns else pd.NA
+            if len(hits) == 1 and (not surname_only(k, hits["key"].iloc[0])
+                                   or clubs_match(squad, hits["club"].iloc[0])):
                 pid, method = hits["player_id"].iloc[0], "fuzzy"
         chosen.append(pid)
         methods.append(method)

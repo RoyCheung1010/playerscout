@@ -28,37 +28,42 @@ from scipy.optimize import linear_sum_assignment
 
 from src.config import FEATURE_LABELS, PERCENTILE_SUFFIX
 
-G, SH, A, KP, PC, PP, TO, TK, INT = (
-    "Goals_p90", "Shots_p90", "Assists_p90", "Key_Passes_p90", "Pass_Completion_Pct",
-    "Progressive_Passes_p90", "Successful_Take_Ons_p90", "pAdj_Tackles_Won_p90", "pAdj_Interceptions_p90",
+G, SH, XG, A, KP, PC, PP, TO, PCR, TK, INT, AER = (
+    "Goals_p90", "Shots_p90", "Non_Penalty_xG_p90", "Assists_p90", "Key_Passes_p90", "Pass_Completion_Pct",
+    "Progressive_Passes_p90", "Successful_Take_Ons_p90", "Progressive_Carries_p90", "pAdj_Tackles_Won_p90",
+    "pAdj_Interceptions_p90", "Aerial_Win_Pct",
 )
-_ALL_LOW = {G: -0.6, SH: -0.6, A: -0.6, KP: -0.6, PP: -0.6, TO: -0.6, TK: -0.6, INT: -0.6}
+_ALL_LOW = {G: -0.6, SH: -0.6, XG: -0.6, A: -0.6, KP: -0.6, PP: -0.6, TO: -0.6, PCR: -0.6, TK: -0.6, INT: -0.6}
 
 ROLE_TEMPLATES: dict[str, dict[str, Mapping[str, float]]] = {
     "FW": {
-        "Penalty-Box Striker": {G: 1.0, SH: 1.0, KP: -0.5, TO: -0.5, PP: -0.5, A: -0.2},
-        "Complete Forward": {G: 0.8, SH: 0.8, A: 0.8, KP: 0.8, TO: 0.5, PP: 0.3},
-        "Dribbling Winger": {TO: 1.0, KP: 0.6, A: 0.4, PP: 0.3, G: -0.2, TK: -0.2},
-        "Creative Playmaker": {KP: 1.0, A: 0.8, PP: 0.8, PC: 0.4, G: -0.3},
-        "Pressing Forward": {TK: 1.0, INT: 0.8, G: -0.3, KP: -0.2},
+        "Penalty-Box Striker": {G: 1.0, SH: 1.0, XG: 1.0, KP: -0.5, TO: -0.5, PP: -0.5, PCR: -0.5, A: -0.2},
+        "Target Forward": {AER: 1.0, SH: 0.5, XG: 0.5, G: 0.3, TO: -0.6, PCR: -0.6, PC: -0.3},
+        "Complete Forward": {G: 0.8, SH: 0.8, XG: 0.8, A: 0.8, KP: 0.8, TO: 0.5, PCR: 0.5, PP: 0.3},
+        "Dribbling Winger": {TO: 1.0, PCR: 0.9, KP: 0.6, A: 0.4, PP: 0.3, G: -0.2, TK: -0.2, AER: -0.3},
+        "Creative Playmaker": {KP: 1.0, A: 0.8, PP: 0.8, PC: 0.4, G: -0.3, XG: -0.3},
+        "Pressing Forward": {TK: 1.0, INT: 0.8, G: -0.3, XG: -0.3, KP: -0.2},
         "Low-Involvement Forward": _ALL_LOW,
     },
     "MF": {
-        "Deep-Lying Playmaker": {PC: 1.0, PP: 1.0, INT: 0.3, G: -0.4, SH: -0.3, TO: -0.2},
-        "Ball-Winning Midfielder": {TK: 1.0, INT: 1.0, KP: -0.4, G: -0.4, SH: -0.3},
-        "Box-to-Box Midfielder": {TK: 0.6, PP: 0.5, SH: 0.6, G: 0.5, TO: 0.4},
-        "Attacking Playmaker": {KP: 1.0, A: 0.9, PP: 0.4, SH: 0.4, TK: -0.3},
-        "Goal-Scoring Midfielder": {G: 1.0, SH: 1.0, A: 0.3, PC: -0.2},
-        "Ball-Carrying Midfielder": {TO: 1.0, PP: 0.5, KP: 0.4},
+        "Deep-Lying Playmaker": {PC: 1.0, PP: 1.0, INT: 0.3, G: -0.4, SH: -0.3, XG: -0.3, TO: -0.2},
+        "Ball-Winning Midfielder": {TK: 1.0, INT: 1.0, AER: 0.3, KP: -0.4, G: -0.4, SH: -0.3},
+        "Box-to-Box Midfielder": {TK: 0.6, PP: 0.5, PCR: 0.5, SH: 0.6, G: 0.5, XG: 0.5, TO: 0.4},
+        "Progressive Playmaker": {PP: 1.0, KP: 0.9, A: 0.7, PCR: 0.4, PC: 0.3, SH: 0.2},
+        "Advanced Attacking Midfielder": {SH: 0.6, G: 0.5, XG: 0.5, KP: 0.5, TO: 0.1, PCR: 0.1,
+                                          PC: -0.6, PP: -0.4, TK: -0.4, INT: -0.4},
+        "Goal-Scoring Midfielder": {G: 1.0, SH: 1.0, XG: 1.0, A: 0.3, PC: -0.2},
+        "Ball-Carrying Midfielder": {PCR: 1.0, TO: 1.0, KP: 0.4, SH: 0.3, PP: 0.3, PC: -0.2, AER: -0.4},
         "Low-Involvement Midfielder": _ALL_LOW,
     },
     "DF": {
-        "Ball-Playing Centre-Back": {PC: 1.0, PP: 0.9, INT: 0.3, TO: -0.5, KP: -0.5, A: -0.4},
-        "Stopper Centre-Back": {INT: 1.0, TK: 0.3, KP: -0.7, TO: -0.7, A: -0.6, PP: -0.3},
-        "Attacking Full-Back": {KP: 1.0, A: 0.9, TO: 0.8, PP: 0.4, SH: 0.3},
-        "Defensive Full-Back": {TK: 1.0, TO: 0.4, KP: 0.2, INT: 0.2, PC: -0.4, G: -0.2},
-        "Set-Piece Threat Centre-Back": {G: 1.0, SH: 0.9, KP: -0.4, TO: -0.5, A: -0.3},
-        "Positional Centre-Back": {PC: 0.4, KP: -0.6, TO: -0.6, A: -0.5, SH: -0.5, PP: -0.4, TK: -0.4, G: -0.2},
+        "Ball-Playing Centre-Back": {PC: 1.0, PP: 0.9, PCR: 0.3, INT: 0.3, AER: 0.3, TO: -0.5, KP: -0.5, A: -0.4},
+        "Stopper Centre-Back": {AER: 1.0, INT: 0.9, TK: 0.3, KP: -0.7, TO: -0.7, PCR: -0.5, A: -0.6, PP: -0.3},
+        "Attacking Full-Back": {KP: 1.0, A: 0.9, TO: 0.8, PCR: 0.8, PP: 0.4, SH: 0.3, AER: -0.5},
+        "Defensive Full-Back": {TK: 1.0, TO: 0.4, KP: 0.2, INT: 0.2, PC: -0.4, G: -0.2, AER: -0.2},
+        "Set-Piece Threat Centre-Back": {G: 1.0, SH: 0.9, XG: 1.0, AER: 0.7, KP: -0.4, TO: -0.5, A: -0.3},
+        "Positional Centre-Back": {PC: 0.4, AER: 0.4, KP: -0.6, TO: -0.6, PCR: -0.5, A: -0.5, SH: -0.5,
+                                   PP: -0.4, TK: -0.4, G: -0.2},
         "Low-Involvement Defender": _ALL_LOW,
     },
 }

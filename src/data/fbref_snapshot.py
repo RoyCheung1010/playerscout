@@ -1,28 +1,36 @@
-"""Offline adapter for a pre-2026 FBref season export (Kaggle snapshot).
+"""Offline adapters for FBref season exports scraped before 2026 (Kaggle).
 
 FBref no longer serves its advanced Opta tables (passing, possession,
 defense), and ``soccerdata`` 1.9.x only reads ``standard``, ``keeper``,
-``shooting``, ``playing_time`` and ``misc``. Full 2023-24 season tables
-therefore come from a snapshot scraped before the change:
+``shooting``, ``playing_time`` and ``misc``. Full season tables therefore
+come from exports scraped before the change. Two layouts are supported and
+detected from their columns:
 
-    Kaggle: akshankrithick/fbref-2017-2024-for-europes-top-5-leagues
-    file:   cleaned_2023-24.csv  (one row per player per club)
+* ``fbref-2017-2024`` (akshankrithick/fbref-2017-2024-for-europes-top-5-leagues,
+  e.g. ``cleaned_2023-24.csv``): renamed columns, a mislabelled minutes
+  column, take-ons as attempts + success rate.
+* ``fbref-big5`` (hubertsidorowicz/football-players-stats-2024-2025,
+  ``players_data-2024_2025.csv``): FBref's own column codes, one table per
+  stat category merged side by side (duplicate names get ``_stats_<table>``).
 
-This module maps that export onto the raw platform schema and reuses the
-FBref transforms (transfer deduplication, count finalisation), so the output
-is interchangeable with :func:`src.data.fbref_transform.build_raw_player_table`.
+Both are mapped onto the raw platform schema and run through the FBref
+transforms (transfer deduplication, count finalisation), so the output is
+interchangeable with :func:`src.data.fbref_transform.build_raw_player_table`.
 
-Team possession is not in the export. It is parsed from FBref's squad table,
-which is embedded in the league player-stats pages ``soccerdata`` already
-caches (``players_<league>_<season>_standard.html``).
+Team possession is in neither export. It is parsed from FBref's squad table
+in league pages ``soccerdata`` has cached, and otherwise **estimated** from
+the players' pass volumes (see :func:`estimate_possession`). Every row records
+which in ``Possession_Source``.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.config import FBREF_LEAGUES
@@ -30,45 +38,84 @@ from src.data.fbref_transform import (
     DedupReport,
     FBrefSchemaError,
     deduplicate_transfers,
+    fill_rate_gaps,
     finalize_counts,
     to_number,
 )
 
 logger = logging.getLogger(__name__)
 
-KAGGLE_DATASET = "akshankrithick/fbref-2017-2024-for-europes-top-5-leagues"
+POSSESSION_SOURCE_COLUMN = "Possession_Source"
+POSSESSION_FBREF = "fbref"
+POSSESSION_ESTIMATED = "estimated"
 
-# Snapshot column -> raw schema column. ``Avg Mins per Match`` is mislabelled
-# in the export: it holds *season total* minutes (max 3420 = 38 x 90).
-SNAPSHOT_COLUMN_MAP: dict[str, str] = {
-    "player": "Player",
-    "nation": "Nation",
-    "pos": "Position",
-    "squad": "Squad",
-    "comp": "League",
-    "age": "Age",
-    "born": "Born",
-    "season": "Season",
-    "Matches Played": "Matches_Played",
-    "Avg Mins per Match": "Minutes_Played",
-    "Goals": "Goals",
-    "Assists": "Assists",
-    "Total Shots": "Shots",
-    "Passes Completed": "Passes_Completed",
-    "Passes Attempted": "Passes_Attempted",
-    "Key passes": "Key_Passes",
-    "Progressive Passes": "Progressive_Passes",
-    "Take ons attempted": "Take_Ons_Attempted",
-    "% Successful take-ons": "_Take_On_Success_Pct",
-    "Tackles Won": "Tackles_Won",
-    "Interceptions": "Interceptions",
+
+@dataclass(frozen=True)
+class SnapshotFormat:
+    """How one export's columns map onto the raw schema."""
+
+    name: str
+    column_map: dict[str, str]
+    signature: tuple[str, ...]  # columns that identify the layout
+    take_on_rate_column: str | None = None  # successful take-ons = attempts x rate
+    league_prefix: bool = False  # "eng Premier League" -> "Premier League"
+    nation_code_last: bool = False  # "eg EGY" -> "EGY"
+
+
+FBREF_2017_2024 = SnapshotFormat(
+    name="fbref-2017-2024",
+    # ``Avg Mins per Match`` is mislabelled in this export: it holds *season
+    # total* minutes (max 3420 = 38 x 90).
+    column_map={
+        "player": "Player", "nation": "Nation", "pos": "Position", "squad": "Squad", "comp": "League",
+        "age": "Age", "born": "Born", "season": "Season", "Matches Played": "Matches_Played",
+        "Avg Mins per Match": "Minutes_Played", "Goals": "Goals", "Assists": "Assists",
+        "Total Shots": "Shots", "Passes Completed": "Passes_Completed",
+        "Passes Attempted": "Passes_Attempted", "Key passes": "Key_Passes",
+        "Progressive Passes": "Progressive_Passes", "Take ons attempted": "Take_Ons_Attempted",
+        "% Successful take-ons": "_Take_On_Success_Pct", "Tackles Won": "Tackles_Won",
+        "Interceptions": "Interceptions", "Exp NPG": "Non_Penalty_xG",
+        "Progressive Carries": "Progressive_Carries", "% Aerial Duels won": "Aerial_Win_Pct",
+    },
+    signature=("Avg Mins per Match", "Exp NPG"),
+    take_on_rate_column="_Take_On_Success_Pct",
+)
+
+FBREF_BIG5 = SnapshotFormat(
+    name="fbref-big5",
+    column_map={
+        "Player": "Player", "Nation": "Nation", "Pos": "Position", "Squad": "Squad", "Comp": "League",
+        "Age": "Age", "Born": "Born", "MP": "Matches_Played", "Starts": "Starts", "Min": "Minutes_Played",
+        "90s": "Nineties", "Gls": "Goals", "Ast": "Assists", "Sh": "Shots", "Cmp": "Passes_Completed",
+        "Att": "Passes_Attempted", "KP": "Key_Passes", "PrgP": "Progressive_Passes",
+        "Att_stats_possession": "Take_Ons_Attempted", "Succ": "Successful_Take_Ons",
+        "TklW": "Tackles_Won", "Int": "Interceptions", "npxG": "Non_Penalty_xG",
+        "PrgC": "Progressive_Carries", "Won%": "Aerial_Win_Pct",
+    },
+    signature=("Att_stats_possession", "npxG", "Won%"),
+    league_prefix=True,
+    nation_code_last=True,
+)
+
+SNAPSHOT_FORMATS: tuple[SnapshotFormat, ...] = (FBREF_2017_2024, FBREF_BIG5)
+
+# Kaggle source per season: (dataset handle, file name).
+SEASON_SOURCES: dict[str, tuple[str, str]] = {
+    "2023-2024": ("akshankrithick/fbref-2017-2024-for-europes-top-5-leagues", "cleaned_2023-24.csv"),
+    "2024-2025": ("hubertsidorowicz/football-players-stats-2024-2025", "players_data-2024_2025.csv"),
 }
+# Back-compatible alias: the 2023-24 source.
+KAGGLE_DATASET = SEASON_SOURCES["2023-2024"][0]
+
+# Kept for callers/tests that refer to the original 2023-24 mapping.
+SNAPSHOT_COLUMN_MAP = FBREF_2017_2024.column_map
 
 COUNT_COLUMNS: tuple[str, ...] = (
     "Matches_Played", "Minutes_Played", "Goals", "Assists", "Shots", "Passes_Completed",
     "Passes_Attempted", "Key_Passes", "Progressive_Passes", "Take_Ons_Attempted", "Tackles_Won",
-    "Interceptions",
+    "Interceptions", "Progressive_Carries", "Non_Penalty_xG",
 )
+OPTIONAL_COUNT_COLUMNS: tuple[str, ...] = ("Starts", "Nineties", "Successful_Take_Ons")
 
 # FBref's squad table and its player table spell six clubs differently.
 # Squad-table name -> player-table name (the latter is what the platform shows).
@@ -81,44 +128,81 @@ SQUAD_ALIASES: dict[str, str] = {
     "Sheffield United": "Sheffield Utd",
 }
 
+# Possession = share of passes attempted (FBref's own definition). A club's
+# share against the league's average opponent compresses the extremes, so it
+# is stretched around 50% by a slope fitted on 2023-24, where FBref's real
+# possession is known for all 96 clubs: MAE 2.11 -> 1.31 points, max 4.5.
+POSSESSION_CALIBRATION_SLOPE: float = 1.4786
 
+
+# --------------------------------------------------------------------------- #
+# Reading and mapping
+# --------------------------------------------------------------------------- #
 def read_snapshot(path: str | Path) -> pd.DataFrame:
     """Read the export CSV as-is (validation happens in :func:`snapshot_to_raw`)."""
     return pd.read_csv(path)
 
 
-def snapshot_to_raw(snapshot: pd.DataFrame, season: str | None = None) -> pd.DataFrame:
-    """Map the export onto schema names; one row per (player, club).
-
-    Successful take-ons are rebuilt from attempts x success rate, the only
-    form the export carries.
+def detect_format(snapshot: pd.DataFrame) -> SnapshotFormat:
+    """Identify the export layout from its columns.
 
     Raises:
-        FBrefSchemaError: a required column is missing, or no rows match ``season``.
+        FBrefSchemaError: no known layout matches.
     """
-    missing = [c for c in SNAPSHOT_COLUMN_MAP if c not in snapshot.columns]
+    columns = set(map(str, snapshot.columns))
+    for fmt in SNAPSHOT_FORMATS:
+        if set(fmt.signature) <= columns:
+            return fmt
+    raise FBrefSchemaError(
+        f"unrecognised FBref export: expected one of {[f.signature for f in SNAPSHOT_FORMATS]}. "
+        f"Available: {sorted(columns)[:30]}…"
+    )
+
+
+def snapshot_to_raw(snapshot: pd.DataFrame, season: str | None = None) -> pd.DataFrame:
+    """Map an export onto schema names; one row per (player, club).
+
+    Raises:
+        FBrefSchemaError: unknown layout, a required column is missing, or no
+            rows match ``season``.
+    """
+    fmt = detect_format(snapshot)
+    missing = [c for c in fmt.column_map if c not in snapshot.columns]
     if missing:
         raise FBrefSchemaError(
-            f"snapshot is missing {missing}. Available: {sorted(map(str, snapshot.columns))[:30]}…"
+            f"{fmt.name} snapshot is missing {missing}. Available: {sorted(map(str, snapshot.columns))[:30]}…"
         )
-    df = snapshot.loc[:, list(SNAPSHOT_COLUMN_MAP)].rename(columns=SNAPSHOT_COLUMN_MAP)
-    if season is not None:
+    df = snapshot.loc[:, list(fmt.column_map)].rename(columns=fmt.column_map)
+    if "Season" in df.columns and season is not None:
         df = df[df["Season"].astype(str) == season]
         if df.empty:
             found = sorted(snapshot["season"].astype(str).unique())
             raise FBrefSchemaError(f"snapshot has no rows for season {season!r} (found {found})")
+    elif season is not None:
+        df = df.assign(Season=season)
 
-    for col in (*COUNT_COLUMNS, "_Take_On_Success_Pct"):
-        df[col] = to_number(df[col]).fillna(0.0)
-    df["Successful_Take_Ons"] = (df["Take_Ons_Attempted"] * df["_Take_On_Success_Pct"] / 100.0).round()
-    df = df.drop(columns=["_Take_On_Success_Pct"])
-    df["Age"] = to_number(df["Age"])
-    df["Born"] = to_number(df["Born"])
+    for col in (*COUNT_COLUMNS, *OPTIONAL_COUNT_COLUMNS):
+        if col in df.columns:
+            df[col] = to_number(df[col]).fillna(0.0)
+    if fmt.take_on_rate_column:
+        rate = to_number(df[fmt.take_on_rate_column]).fillna(0.0)
+        df["Successful_Take_Ons"] = (df["Take_Ons_Attempted"] * rate / 100.0).round()
+        df = df.drop(columns=[fmt.take_on_rate_column])
     for col in ("Player", "Squad", "League", "Position", "Nation"):
         df[col] = df[col].fillna("").astype(str).str.strip()
+    if fmt.league_prefix:
+        df["League"] = df["League"].str.replace(r"^[a-z]{2,3}\s+", "", regex=True)
+    if fmt.nation_code_last:
+        df["Nation"] = df["Nation"].str.split().str[-1].fillna("")
+    df["Age"] = to_number(df["Age"])
+    df["Born"] = to_number(df["Born"])
+    df["Aerial_Win_Pct"] = fill_rate_gaps(df, "Aerial_Win_Pct")
     return df.reset_index(drop=True)
 
 
+# --------------------------------------------------------------------------- #
+# Possession
+# --------------------------------------------------------------------------- #
 def parse_cached_possession(cache_dir: str | Path, season_code: str) -> pd.DataFrame:
     """Team possession from soccerdata's cached FBref league pages.
 
@@ -133,7 +217,7 @@ def parse_cached_possession(cache_dir: str | Path, season_code: str) -> pd.DataF
     for league_id, league_name in FBREF_LEAGUES.items():
         page = Path(cache_dir) / f"players_{league_id}_{season_code}_standard.html"
         if not page.exists():
-            logger.warning("No cached FBref page for %s (%s)", league_name, page.name)
+            logger.info("No cached FBref page for %s (%s)", league_name, page.name)
             continue
         tree = html.parse(str(page))
         table = _find_table(tree, "stats_squads_standard_for")
@@ -148,17 +232,60 @@ def parse_cached_possession(cache_dir: str | Path, season_code: str) -> pd.DataF
     return pd.DataFrame(rows, columns=["League", "Squad", "Team_Possession_Pct"])
 
 
+def estimate_possession(raw: pd.DataFrame, slope: float = POSSESSION_CALIBRATION_SLOPE) -> pd.DataFrame:
+    """Estimate each club's possession from its players' passes attempted.
+
+    ``share = P_club / (P_club + mean P of the league's other clubs)`` is a
+    club's share of passes against an average opponent (in a double round
+    robin every club faces every other equally), then stretched around 50%
+    by ``slope``. Returns ``(League, Squad, Team_Possession_Pct)``.
+    """
+    team = raw.groupby(["League", "Squad"], as_index=False)["Passes_Attempted"].sum()
+    n = team.groupby("League")["Passes_Attempted"].transform("count")
+    total = team.groupby("League")["Passes_Attempted"].transform("sum")
+    others = (total - team["Passes_Attempted"]) / (n - 1).where(n > 1)
+    share = 100.0 * team["Passes_Attempted"] / (team["Passes_Attempted"] + others)
+    estimate = (50.0 + slope * (share - 50.0)).fillna(50.0).clip(30.0, 75.0).round(1)
+    return team.assign(Team_Possession_Pct=estimate)[["League", "Squad", "Team_Possession_Pct"]]
+
+
+def combine_possession(cached: pd.DataFrame | None, estimated: pd.DataFrame) -> pd.DataFrame:
+    """FBref possession where cached, the estimate for every other club.
+
+    Adds ``Possession_Source`` (``"fbref"`` / ``"estimated"``) per club.
+    """
+    est = estimated.assign(**{POSSESSION_SOURCE_COLUMN: POSSESSION_ESTIMATED})
+    if cached is None or cached.empty:
+        return est
+    real = cached.assign(**{POSSESSION_SOURCE_COLUMN: POSSESSION_FBREF})
+    merged = est.merge(real, on=["League", "Squad"], how="left", suffixes=("_est", ""))
+    use_real = merged["Team_Possession_Pct"].notna()
+    merged["Team_Possession_Pct"] = merged["Team_Possession_Pct"].where(use_real, merged["Team_Possession_Pct_est"])
+    merged[POSSESSION_SOURCE_COLUMN] = np.where(use_real, POSSESSION_FBREF, POSSESSION_ESTIMATED)
+    return merged[["League", "Squad", "Team_Possession_Pct", POSSESSION_SOURCE_COLUMN]]
+
+
+# --------------------------------------------------------------------------- #
+# Assembly
+# --------------------------------------------------------------------------- #
 def build_snapshot_dataset(
     snapshot: pd.DataFrame,
     possession: pd.DataFrame | None,
     season: str | None = None,
 ) -> tuple[pd.DataFrame, DedupReport]:
-    """Export -> one season-total row per player in the raw schema (pre-enrichment)."""
+    """Export -> one season-total row per player in the raw schema (pre-enrichment).
+
+    ``possession`` is FBref's real possession (may be partial or ``None``);
+    clubs it does not cover get the pass-share estimate.
+    """
     from src.data.real_data_enricher import map_team_possession  # avoid import cycle
 
     raw = snapshot_to_raw(snapshot, season)
-    if possession is not None and not possession.empty:
-        raw = map_team_possession(raw, possession)
+    table = combine_possession(possession, estimate_possession(raw))
+    raw = map_team_possession(raw, table)
+    sources = table.set_index(["League", "Squad"])[POSSESSION_SOURCE_COLUMN]
+    raw[POSSESSION_SOURCE_COLUMN] = [sources.get((lg, sq), POSSESSION_ESTIMATED)
+                                     for lg, sq in zip(raw["League"], raw["Squad"])]
     deduped, report = deduplicate_transfers(raw)
     return finalize_counts(deduped), report
 
@@ -187,6 +314,8 @@ def season_code(season: str) -> str:
 
 
 __all__ = [
-    "KAGGLE_DATASET", "SNAPSHOT_COLUMN_MAP", "SQUAD_ALIASES", "build_snapshot_dataset",
-    "parse_cached_possession", "read_snapshot", "season_code", "snapshot_to_raw",
+    "FBREF_2017_2024", "FBREF_BIG5", "KAGGLE_DATASET", "POSSESSION_CALIBRATION_SLOPE",
+    "POSSESSION_SOURCE_COLUMN", "SEASON_SOURCES", "SNAPSHOT_COLUMN_MAP", "SNAPSHOT_FORMATS",
+    "SQUAD_ALIASES", "build_snapshot_dataset", "combine_possession", "detect_format",
+    "estimate_possession", "parse_cached_possession", "read_snapshot", "season_code", "snapshot_to_raw",
 ]

@@ -41,6 +41,9 @@ def make_row(**overrides: object) -> dict[str, object]:
         "Successful_Take_Ons": 20,
         "Tackles_Won": 30,
         "Interceptions": 20,
+        "Non_Penalty_xG": 8.5,
+        "Progressive_Carries": 40,
+        "Aerial_Win_Pct": 55.0,
     }
     row.update(overrides)
     return row
@@ -285,6 +288,7 @@ def test_league_scaling_leaves_pass_completion_untouched() -> None:
     out = _two_leagues(apply=True)
     assert out.loc["secondary", "Pass_Completion_Pct"] == pytest.approx(85.0)
     assert out.loc["top5", "Pass_Completion_Pct"] == pytest.approx(85.0)
+    assert out.loc["secondary", "Aerial_Win_Pct"] == pytest.approx(55.0)  # rates are never scaled
 
 
 def test_league_scaling_can_be_disabled() -> None:
@@ -312,3 +316,15 @@ def test_full_pipeline_on_synthetic_schema_round_trip(tmp_path) -> None:
     np.testing.assert_allclose(
         from_memory[list(CORE_FEATURES)].to_numpy(), from_csv[list(CORE_FEATURES)].to_numpy()
     )
+
+
+def test_new_volume_stats_converted_to_per90(loader: DataLoader) -> None:
+    out = loader.process(frame(make_row()))
+    assert out.loc[0, "Non_Penalty_xG_p90"] == pytest.approx(8.5 / 1800 * 90)
+    assert out.loc[0, "Progressive_Carries_p90"] == pytest.approx(40 / 1800 * 90)
+    assert out.loc[0, "Aerial_Win_Pct"] == pytest.approx(55.0)
+
+
+def test_aerial_rate_out_of_range_rows_dropped(loader: DataLoader) -> None:
+    out = loader.process(frame(make_row(), make_row(Player="Bad", Aerial_Win_Pct=140.0)))
+    assert list(out["Player"]) == ["Test Player"]

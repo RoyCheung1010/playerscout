@@ -51,7 +51,7 @@ def test_scaler_shapes_and_types(
     players: pd.DataFrame, prep: ScoutingPreprocessor, scaler_type: str, cls: type
 ) -> None:
     X, scaler = prep.scale_features(players, scaler_type)  # type: ignore[arg-type]
-    assert X.shape == (len(players), 9)
+    assert X.shape == (len(players), len(CORE_FEATURES))
     assert isinstance(scaler, cls)
     assert np.isfinite(X).all()
 
@@ -173,11 +173,10 @@ def test_composite_columns_exist_and_are_bounded(scored: pd.DataFrame) -> None:
 
 
 def test_composite_is_mean_of_member_percentiles(scored: pd.DataFrame) -> None:
-    expected = scored[["Goals_p90_pct", "Shots_p90_pct"]].mean(axis=1)
+    expected = scored[["Goals_p90_pct", "Shots_p90_pct", "Non_Penalty_xG_p90_pct"]].mean(axis=1)
     pd.testing.assert_series_equal(scored["Score_Finishing"], expected, check_names=False)
-    pd.testing.assert_series_equal(
-        scored["Score_Dribbling"], scored["Successful_Take_Ons_p90_pct"], check_names=False
-    )
+    dribbling = scored[["Successful_Take_Ons_p90_pct", "Progressive_Carries_p90_pct"]].mean(axis=1)
+    pd.testing.assert_series_equal(scored["Score_Dribbling"], dribbling, check_names=False)
 
 
 def test_composites_compute_percentiles_if_missing(players: pd.DataFrame, prep: ScoutingPreprocessor) -> None:

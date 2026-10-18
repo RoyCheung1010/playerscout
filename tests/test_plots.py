@@ -197,7 +197,7 @@ def test_radar_uses_percentile_columns_and_closes_polygon(processed_players: pd.
 
 
 def test_radar_clips_out_of_range_values() -> None:
-    wild = {f: v for f, v in zip(FEATURES, [-50, 150, 1e6, 50, -1, 101, 0, 100, 42])}
+    wild = {f: v for f, v in zip(FEATURES, [-50, 150, 1e6, 50, -1, 101, 0, 100, 42, 7, 99, 63])}
     fig = plots.plot_radar_comparison(wild, "Wild")
     render(fig)
     ydata = np.asarray(radar_lines(fig)[0].get_ydata())

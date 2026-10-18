@@ -41,7 +41,7 @@ from src.config import (
     PER90_SUFFIX,
     POSITION_GROUPS,
     POSSESSION_ADJUSTED_STATS,
-    RAW_COUNT_COLUMNS,
+    RAW_VOLUME_COLUMNS,
     RAW_RATE_COLUMNS,
     REQUIRED_RAW_COLUMNS,
     real_data_filename,
@@ -290,7 +290,7 @@ class DataLoader:
             df[col] = df[col].astype("string").str.strip()
 
         numeric_cols = [
-            c for c in (*_NUMERIC_METADATA, *RAW_COUNT_COLUMNS, *RAW_RATE_COLUMNS) if c in df.columns
+            c for c in (*_NUMERIC_METADATA, *RAW_VOLUME_COLUMNS, *RAW_RATE_COLUMNS) if c in df.columns
         ]
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -301,8 +301,8 @@ class DataLoader:
             & df["Player"].fillna("").ne("").to_numpy(dtype=bool)
             & (df["Minutes_Played"] >= 0)
             & df["Team_Possession_Pct"].between(0, 100)
-            & df["Pass_Completion_Pct"].between(0, 100)
-            & (df[[c for c in RAW_COUNT_COLUMNS if c in df.columns]].fillna(0) >= 0).all(axis=1)
+            & df[list(RAW_RATE_COLUMNS)].apply(lambda col: col.between(0, 100)).all(axis=1)
+            & (df[[c for c in RAW_VOLUME_COLUMNS if c in df.columns]].fillna(0) >= 0).all(axis=1)
         )
         return df.loc[valid].copy()
 
@@ -311,7 +311,7 @@ class DataLoader:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _add_per90(df: pd.DataFrame) -> pd.DataFrame:
-        for col in RAW_COUNT_COLUMNS:
+        for col in RAW_VOLUME_COLUMNS:
             if col in df.columns:
                 df[f"{col}{PER90_SUFFIX}"] = per90(df[col].fillna(0), df["Minutes_Played"])
         return df

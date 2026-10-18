@@ -85,8 +85,10 @@ def fbref_tables(rows: list[tuple] = PLAYERS) -> dict[str, pd.DataFrame]:
     standard = frame(
         [("nation", ""), ("pos", ""), ("age", ""), ("born", ""), ("Playing Time", "MP"),
          ("Playing Time", "Starts"), ("Playing Time", "Min"), ("Playing Time", "90s"),
-         ("Performance", "Gls"), ("Performance", "Ast"), ("Expected", "xG")],
-        [[r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], 0.0] for r in rows],
+         ("Performance", "Gls"), ("Performance", "Ast"), ("Expected", "xG"), ("Expected", "npxG"),
+         ("Progression", "PrgC")],
+        [[r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], 0.0, round(r[13] * 0.11, 1), r[18] // 2]
+         for r in rows],
     )
     shooting = frame([("Standard", "Gls"), ("Standard", "Sh"), ("Standard", "SoT")],
                      [[r[11], r[13], r[13] // 3] for r in rows])
@@ -98,8 +100,11 @@ def fbref_tables(rows: list[tuple] = PLAYERS) -> dict[str, pd.DataFrame]:
                        [[r[18], r[19], 0.0] for r in rows])
     defense = frame([("Tackles", "Tkl"), ("Tackles", "TklW"), ("Int", "")],
                     [[r[20] + 5, r[20], r[21]] for r in rows])
+    # Keepers have no aerial duels logged: FBref leaves the rate blank.
+    misc = frame([("Aerial Duels", "Won"), ("Aerial Duels", "Won%")],
+                 [[10, None if r[4] == "GK" else 40.0 + 2 * (i % 5)] for i, r in enumerate(rows)])
     return {"standard": standard, "shooting": shooting, "passing": passing,
-            "possession": possession, "defense": defense}
+            "possession": possession, "defense": defense, "misc": misc}
 
 
 def fbref_team_table(teams: list[tuple] = TEAMS) -> pd.DataFrame:

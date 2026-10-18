@@ -12,7 +12,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from src import pipeline
-from src.config import COMPOSITE_SCORES, REQUIRED_RAW_COLUMNS
+from src.config import COMPOSITE_SCORES, CORE_FEATURES, REQUIRED_RAW_COLUMNS
 from src.data.loader import DataLoader, DataValidationError
 from src.exceptions import InsufficientDataError
 
@@ -44,10 +44,10 @@ def test_filter_cohort(processed_players: pd.DataFrame) -> None:
 def test_build_cohort_model(fw_model: pipeline.CohortModel) -> None:
     cohort = fw_model.cohort
     assert {"Cluster", "Assigned_Role", "PC1", "PC2"} <= set(cohort.columns)
-    assert fw_model.X.shape == (len(cohort), 9)
+    assert fw_model.X.shape == (len(cohort), len(CORE_FEATURES))
     assert set(cohort["Cluster"]) == set(range(5))
     assert set(cohort["Assigned_Role"]) == set(fw_model.role_names.values())
-    assert fw_model.centroids.shape == (5, 9)
+    assert fw_model.centroids.shape == (5, len(CORE_FEATURES))
 
 
 def test_build_cohort_model_rejects_tiny_cohort(processed_players: pd.DataFrame) -> None:
@@ -292,7 +292,7 @@ def test_upload_mode_without_file_shows_template() -> None:
 # --------------------------------------------------------------------------- #
 # Real Data source
 # --------------------------------------------------------------------------- #
-REAL_SOURCE = "Real Data (2023-24 Top 5 European Leagues)"
+REAL_SOURCE = "Real Data (Top 5 European Leagues)"
 
 
 def _benchmark_frame() -> pd.DataFrame:
@@ -319,7 +319,7 @@ def _real_source_app(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> AppTest
 def test_real_source_without_data_shows_instructions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     at = _real_source_app(monkeypatch, tmp_path)
     assert not at.exception
-    assert any("Real data has not been ingested yet" in i.value for i in at.info)
+    assert any("has not been ingested yet" in i.value for i in at.info)
     assert any("ingest_fbref_snapshot.py --download" in i.value for i in at.info)
 
 
@@ -364,3 +364,36 @@ def test_real_source_with_transfermarkt_shows_sources(tmp_path: Path, monkeypatc
     assert "Market values:** 100% Transfermarkt" in notice and "listed in 2026" in notice
     assert "model estimates" in notice  # the 25% proxy contracts are still disclosed
     assert "2026" in (at.select_slider(key="contract_years").help or "")
+
+
+def test_real_source_season_choice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data.real_data_enricher import CONTRACT_SOURCE_COLUMN, VALUE_SOURCE_COLUMN
+
+    for season, origin_label in (("2023-2024", "2023_2024"), ("2024-2025", "2024_2025")):
+        frame = _benchmark_frame()
+        frame["Data_Origin"] = "fbref"
+        frame["Season"] = season
+        frame[VALUE_SOURCE_COLUMN] = "transfermarkt"
+        frame[CONTRACT_SOURCE_COLUMN] = "transfermarkt"
+        frame["Possession_Source"] = "estimated" if season == "2024-2025" else "fbref"
+        frame.to_parquet(tmp_path / f"real_players_{origin_label}.parquet", index=False)
+    at = _real_source_app(monkeypatch, tmp_path)
+    assert not at.exception and not at.error
+    season_box = at.selectbox(key="real_season")
+    assert season_box.value == "2024-2025"  # newest by default
+    assert list(season_box.options) == ["2024-25", "2023-24"]
+    assert any("(2024-25)" in i.value for i in at.info)
+    assert any("Team possession:** 100%" in i.value for i in at.info)  # estimated possession disclosed
+    season_box.set_value("2023-2024").run()
+    assert not at.exception and any("(2023-24)" in i.value for i in at.info)
+    assert not any("Team possession" in i.value for i in at.info)
+
+
+def test_missing_season_shows_instructions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    frame = _benchmark_frame()
+    frame["Data_Origin"] = "fbref"
+    frame.to_parquet(tmp_path / "real_players_2023_2024.parquet", index=False)
+    at = _real_source_app(monkeypatch, tmp_path)
+    assert at.selectbox(key="real_season").value == "2023-2024"  # the ingested one first
+    at.selectbox(key="real_season").set_value("2024-2025").run()
+    assert any("2024-25 has not been ingested yet" in i.value for i in at.info)

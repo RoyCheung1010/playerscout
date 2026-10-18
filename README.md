@@ -385,7 +385,7 @@ and `kagglehub 1.0.2` (`requirements-ingest.txt`).
 
 ## Testing & quality assurance
 
-**303 tests**, all passing, and also passing under `pytest -W error` (every
+**329 tests**, all passing, and also passing under `pytest -W error` (every
 warning treated as a failure). The full suite runs in about 25 seconds and
 needs no network access: FBref and the Kaggle snapshot are replaced by
 fixtures shaped exactly like their real output.
@@ -399,9 +399,10 @@ fixtures shaped exactly like their real output.
 | `test_clustering.py` | 29 | Label ranges, diagnostics edge cases ($k \ge n$, duplicate points), unique role labels, NMI > 0.40 vs ground truth |
 | `test_similarity.py` | 32 | Target exclusion, clone = 100%, cosine vs Euclidean behaviour, weight math, strict filter pruning, filters never changing scores |
 | `test_plots.py` | 45 | Headless (`Agg`) rendering of every chart, value clipping, axis dimensions, theme isolation, **memory safety** |
-| `test_fbref_snapshot.py` | 18 | Snapshot columns onto the raw schema (season-minutes quirk, take-ons from rate), schema and season errors, possession parsed from cached FBref pages (including comment-wrapped tables) with club aliases, transfer merging with weighted possession, namesakes, loader + model end-to-end, script success, no-cache and failure paths |
+| `test_transfermarkt.py` | 24 | Name variants accepted and look-alikes rejected, exact and fuzzy matching, namesakes split by birth year, same name and year split by league, no cross-year or double claims, season-end values, listed contracts only for tracked players, snapshot reference year, proxies kept when unmatched |
+| `test_fbref_snapshot.py` | 19 | Snapshot columns onto the raw schema (season-minutes quirk, take-ons from rate), schema and season errors, possession parsed from cached FBref pages (including comment-wrapped tables) with club aliases, transfer merging with weighted possession, namesakes, loader + model end-to-end, script success, Transfermarkt attachment, no-cache and failure paths |
 | `test_real_data_pipeline.py` | 38 | FBref header flattening onto the raw schema, transfer deduplication (season totals, primary club, minutes-weighted possession, namesakes kept apart), enrichment with no nulls and deterministic proxies, `load_real` through the full pipeline, real-over-benchmark precedence, the rate-limit fallback never writing to the real path, failure classification, headless-by-default fetching |
-| `test_app_smoke.py` | 38 | Pipeline helpers, plus `app.py` run end-to-end with Streamlit's `AppTest`: every cohort, metric and scaler, impossible filters, all-zero weights, empty league selection, upload mode, and the Real Data source (missing file, benchmark warning, estimate notice) |
+| `test_app_smoke.py` | 39 | Pipeline helpers, plus `app.py` run end-to-end with Streamlit's `AppTest`: every cohort, metric and scaler, impossible filters, all-zero weights, empty league selection, upload mode, and the Real Data source (missing file, benchmark warning, estimate notice, Transfermarkt source split) |
 
 **Test styles used**
 
@@ -427,7 +428,7 @@ Hypothesis); invariants are checked on fixed seeded data.
 ## Real data (FBref 2023-24)
 
 The platform runs on real Top 5 league data for the 2023-24 season: 2,508
-players (after merging 115 mid-season transfers), 96 clubs, every stat the
+players (after merging 114 mid-season transfers), 96 clubs, every stat the
 model uses, and real team possession.
 
 ### Where the data comes from
@@ -449,7 +450,7 @@ scraped before the change**, published on Kaggle:
 
 ```bash
 pip install -r requirements-ingest.txt
-python scripts/ingest_fbref_snapshot.py --download     # fetch the Kaggle snapshot (public, no login)
+python scripts/ingest_fbref_snapshot.py --download     # fetch FBref snapshot + Transfermarkt (public, no login)
 python scripts/ingest_fbref_snapshot.py --csv path/to/cleaned_2023-24.csv
 ```
 
@@ -461,6 +462,8 @@ sidebar.
 | `--download` / `--csv PATH` | Get the snapshot via `kagglehub`, or use a local copy (one is required). |
 | `--season 2023-2024` | Season to ingest (default). |
 | `--fbref-cache DIR` | Where the cached FBref pages live (default `~/soccerdata/data/FBref`). |
+| `--transfermarkt DIR` | Local Transfermarkt files (downloaded automatically with `--download`). |
+| `--no-transfermarkt` | Keep proxy market values and contracts. |
 | `--out-dir PATH` | Output directory (default `data/processed/`). |
 
 Exit codes: `0` real data written, `2` failed (nothing written). There is no
@@ -492,8 +495,8 @@ above, so it then falls back to the labelled benchmark (see below).
    their clubs; and players are keyed by `(name, birth year)` so namesakes
    (two different Rodris) are never merged. Pass completion is recomputed from
    the summed totals.
-4. **Enrich** (`src/data/real_data_enricher.py`) with market value and
-   contract expiry estimates (see below).
+4. **Enrich** with market values and contracts: Transfermarkt where the
+   player matches, a labelled proxy otherwise (see below).
 5. **Write** `data/processed/real_players_2023_2024.parquet` and a `.csv` twin.
 
 The original live-scraping path (`scripts/ingest_fbref.py`,
@@ -518,30 +521,46 @@ same pipeline** as every other source: validation, minutes filter, per-90,
 pAdj (k = 0.05) and league coefficients. Goalkeepers are dropped by the
 position filter.
 
-### Estimated fields: market value and contracts
+### Market values and contracts (Transfermarkt)
 
-FBref publishes neither market values nor contract dates, and `soccerdata`
-1.9.x has no Transfermarkt reader. Both are therefore **estimated**, labelled
-per row, and flagged in the dashboard with a banner:
+FBref publishes neither, so they come from the public Transfermarkt dataset
+[`davidcariboo/player-scores`](https://www.kaggle.com/datasets/davidcariboo/player-scores)
+(`src/data/transfermarkt.py`). `--download` fetches only the two files needed,
+`players.csv` and `player_valuations.csv`; `--transfermarkt DIR` uses a local
+copy and `--no-transfermarkt` skips it.
 
-- **`Market_Value_EUR_M`** (`Market_Value_Source = "proxy"`) is deterministic:
+- **Matching.** Every match requires the same **birth year**. Pass 1 matches
+  the accent-free name exactly (2,250 players). Pass 2 handles spelling
+  variants, but only among players Transfermarkt valued in the **same league**
+  that season, and only when exactly one candidate fits (130 players): name
+  order (`Kim Min-jae` / `Min-jae Kim`), extra or dropped names (`Ohis Felix
+  Uduokhai` / `Felix Uduokhai`), short first names (`Gio` / `Giovanni`,
+  `Álex` / `Alejandro`), mononyms (`Gabriel Magalhães` / `Gabriel`) and
+  near-identical transliterations. Ambiguous cases, and two of our players
+  claiming one Transfermarkt player, are left unmatched rather than guessed.
+  Result: 2,380 of 2,508 players (95%) matched.
+- **`Market_Value_EUR_M`** is the player's **latest valuation up to 30 June
+  2024**, so it describes the same season as the stats (Bellingham, Mbappé,
+  Haaland and Vinícius €180M; Kane €100M). 2,379 players (95%).
+- **`Contract_Expiry_Year`** is the contract **listed at the dataset's
+  snapshot** (June 2026), because Transfermarkt keeps no contract history. It is
+  only used for players Transfermarkt still tracks; for players who left the
+  covered leagues the listing may be stale. 1,714 players (68%). Years
+  remaining therefore count from the snapshot year, stored in
+  `Contract_Reference_Year` (2026), and the listed contract may be with a club
+  the player joined after 2023-24 (Mbappé's runs to 2029 at Real Madrid).
+- **Everything else keeps a labelled proxy**, never a blank:
+  `Market_Value_Source` and `Contract_Source` are `"transfermarkt"` or
+  `"proxy"` on every row, and the dashboard shows the split.
 
-  $$
-  \text{value} = 120 \times q^{2.2} \times \text{age curve} \times \text{league coef} \times \text{usage}
-  $$
+The proxies, used for unmatched players or when Transfermarkt is skipped:
 
-  where $q$ blends within-position percentiles of scoring output and passing
-  output (forwards weighted 70/30 towards scoring, midfielders 40/60, defenders
-  20/80), the age curve peaks at 25, and usage rises with minutes. If a
-  Transfermarkt source becomes available, fetched values replace the proxy
-  row by row (`Market_Value_Source = "transfermarkt"`).
-- **`Contract_Expiry_Year`** (`Contract_Source = "proxy"`) is a stable
-  pseudo-random year in 2026–2029, seeded by a hash of name and birth year,
-  so re-runs never reshuffle it.
-
-Budget and contract filters on real data are therefore **indicative only**.
-Contract years remaining are counted from the dataset's own season end (2024
-for 2023-24), not from the synthetic database's 2026.
+- **Value:** `120 × q^2.2 × age curve × league coef × usage`, where $q$
+  blends within-position percentiles of scoring and passing output (forwards
+  weighted 70/30 towards scoring, midfielders 40/60, defenders 20/80), the
+  age curve peaks at 25, and usage rises with minutes.
+- **Contract:** a stable pseudo-random year in 2026–2029, seeded by a hash of
+  name and birth year, so re-runs never reshuffle it.
 
 ### Caching
 
@@ -614,6 +633,7 @@ playerscout/
 │   │   ├── fbref_snapshot.py      # FBref snapshot -> raw schema, cached possession
 │   │   ├── fbref_transform.py     # FBref tables -> raw schema, transfer dedup
 │   │   ├── real_data_enricher.py  # possession, value & contract proxies
+│   │   ├── transfermarkt.py       # real market values & contracts, name matching
 │   │   └── loader.py              # validation, per-90, pAdj, league scaling, load_real
 │   ├── features/
 │   │   └── preprocessor.py        # scaling, eCDF percentiles, composites
@@ -623,5 +643,5 @@ playerscout/
 │   │   └── similarity.py          # ScoutingSimilarityEngine
 │   └── visualization/
 │       └── plots.py               # dark-theme Matplotlib suite
-└── tests/                         # 303 tests (see above)
+└── tests/                         # 329 tests (see above)
 ```

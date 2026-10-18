@@ -111,6 +111,26 @@ def dataset_reference_year(df: pd.DataFrame) -> int:
         return CURRENT_SEASON_END_YEAR
 
 
+def contract_reference_year(df: pd.DataFrame) -> int:
+    """Year that contract "years remaining" count from.
+
+    Real Transfermarkt contracts are the ones listed at the dataset's
+    snapshot, so the ingestion records that year in
+    ``Contract_Reference_Year``; otherwise the season end is used.
+    """
+    column = "Contract_Reference_Year"
+    if column in df.columns and not df[column].dropna().empty:
+        return int(df[column].dropna().mode().iloc[0])
+    return dataset_reference_year(df)
+
+
+def source_share(df: pd.DataFrame, column: str, source: str) -> float:
+    """Fraction of rows whose provenance ``column`` equals ``source``."""
+    if column not in df.columns or df.empty:
+        return 0.0
+    return float((df[column] == source).mean())
+
+
 def dataset_origin(df: pd.DataFrame) -> str | None:
     """Provenance label (``"fbref"``, ``"synthetic-benchmark"``) if recorded."""
     if DATA_ORIGIN_COLUMN not in df.columns or df[DATA_ORIGIN_COLUMN].dropna().empty:

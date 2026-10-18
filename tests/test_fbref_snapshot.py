@@ -251,3 +251,29 @@ def test_script_fails_cleanly_and_writes_nothing(tmp_path: Path) -> None:
 
 def test_snapshot_filename_for_season() -> None:
     assert _load_script().snapshot_filename("2023-2024") == "cleaned_2023-24.csv"
+
+
+def test_script_attaches_transfermarkt(tmp_path: Path, snapshot: pd.DataFrame) -> None:
+    module = _load_script()
+    csv = tmp_path / "s.csv"
+    snapshot.to_csv(csv, index=False)
+    tm_dir = tmp_path / "tm"
+    tm_dir.mkdir()
+    pd.DataFrame({
+        "player_id": [1], "name": ["Harry Kane"], "date_of_birth": ["1993-07-28"],
+        "contract_expiration_date": ["2027-06-30"], "last_season": [2025],
+    }).to_csv(tm_dir / "players.csv", index=False)
+    pd.DataFrame({
+        "player_id": [1, 1], "date": ["2024-06-01", "2026-06-12"], "market_value_in_eur": [100_000_000, 70_000_000],
+        "player_club_domestic_competition_id": ["L1", "L1"],
+    }).to_csv(tm_dir / "player_valuations.csv", index=False)
+    code = module.main(["--csv", str(csv), "--fbref-cache", str(write_cache(tmp_path / "FBref")),
+                        "--transfermarkt", str(tm_dir), "--out-dir", str(tmp_path / "out")])
+    assert code == 0
+    written = pd.read_parquet(tmp_path / "out" / "real_players_2023_2024.parquet")
+    kane = written[written.Player == "Harry Kane"].iloc[0]
+    assert (kane["Market_Value_EUR_M"], kane["Contract_Expiry_Year"]) == (100.0, 2027)
+    assert kane["Market_Value_Source"] == "transfermarkt"
+    assert (written["Contract_Reference_Year"] == 2026).all()
+    others = written[written.Player != "Harry Kane"]
+    assert (others["Market_Value_Source"] == "proxy").all()

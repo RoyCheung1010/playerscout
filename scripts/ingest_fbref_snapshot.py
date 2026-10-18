@@ -2,8 +2,8 @@
 
 Usage::
 
-    python scripts/ingest_fbref_snapshot.py --download              # fetch the Kaggle snapshot
-    python scripts/ingest_fbref_snapshot.py --csv path/to/cleaned_2023-24.csv
+    python scripts/ingest_fbref_snapshot.py --download              # fetch both Kaggle datasets
+    python scripts/ingest_fbref_snapshot.py --csv path/to/cleaned_2023-24.csv --transfermarkt path/to/player-scores
 
 Why a snapshot: FBref no longer publishes its advanced (Opta) tables, so
 ``scripts/ingest_fbref.py`` can only fetch standard and shooting stats. The
@@ -11,8 +11,9 @@ snapshot carries every stat the model needs; team possession comes from the
 FBref league pages ``soccerdata`` has cached (``~/soccerdata/data/FBref``).
 
 Pipeline: snapshot CSV -> schema mapping -> possession mapping -> transfer
-deduplication -> valuation/contract enrichment -> ``real_players_<season>``
-``.parquet`` and ``.csv`` in ``data/processed/``. There is no synthetic
+deduplication -> proxy valuation/contracts -> real Transfermarkt values and
+contracts where players match (``src/data/transfermarkt.py``) ->
+``real_players_<season>`` ``.parquet`` and ``.csv`` in ``data/processed/``. There is no synthetic
 fallback here: on any failure the script exits with code 2 and writes nothing.
 """
 
@@ -36,6 +37,7 @@ from src.data.fbref_snapshot import (  # noqa: E402
     season_code,
 )
 from src.data.fbref_transform import FBrefSchemaError  # noqa: E402
+from src.data import transfermarkt  # noqa: E402
 from src.data.real_data_enricher import enrich_real_players, primary_position_counts  # noqa: E402
 
 logger = logging.getLogger("ingest_fbref_snapshot")
@@ -58,6 +60,25 @@ def download_snapshot(season: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"{path.name} not in the downloaded dataset ({sorted(p.name for p in folder.iterdir())})")
     return path
+
+
+def download_transfermarkt() -> Path:
+    """Fetch only the two Transfermarkt files needed (the full dataset is ~900 MB)."""
+    import kagglehub
+
+    paths = [Path(kagglehub.dataset_download(transfermarkt.KAGGLE_DATASET, path=name))
+             for name in transfermarkt.REQUIRED_FILES]
+    return paths[0].parent
+
+
+def add_transfermarkt(df: pd.DataFrame, folder: Path, season: str) -> pd.DataFrame:
+    players, valuations = transfermarkt.read_transfermarkt(folder)
+    out, report = transfermarkt.attach_transfermarkt(df, players, valuations, season)
+    logger.info("Transfermarkt (snapshot %s): matched %d/%d players (%d exact, %d fuzzy); "
+                "real values %d, real contracts %d; the rest keep proxies",
+                report.snapshot_date.date(), report.n_matched, report.n_players, report.n_exact,
+                report.n_fuzzy, report.n_values, report.n_contracts)
+    return out
 
 
 def build(csv: Path, season: str, cache_dir: Path) -> pd.DataFrame:
@@ -85,12 +106,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fbref-cache", type=Path, default=DEFAULT_FBREF_CACHE,
                         help="soccerdata FBref cache, for team possession")
     parser.add_argument("--out-dir", type=Path, default=PROCESSED_DATA_DIR)
+    parser.add_argument("--transfermarkt", type=Path, default=None,
+                        help="folder with Transfermarkt players.csv + player_valuations.csv "
+                             f"({transfermarkt.KAGGLE_DATASET}); downloaded automatically with --download")
+    parser.add_argument("--no-transfermarkt", action="store_true",
+                        help="keep proxy market values and contracts")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
     try:
         csv = download_snapshot(args.season) if args.download else args.csv
         df = build(csv, args.season, args.fbref_cache)
+        tm_folder = None if args.no_transfermarkt else (
+            args.transfermarkt or (download_transfermarkt() if args.download else None))
+        if tm_folder is not None:
+            df = add_transfermarkt(df, tm_folder, args.season)
+        else:
+            logger.warning("No Transfermarkt data: market values and contracts are proxies.")
     except (FileNotFoundError, FBrefSchemaError, ImportError, ValueError) as exc:
         logger.error("Snapshot ingestion failed: %s", exc)
         return 2

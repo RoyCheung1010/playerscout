@@ -43,7 +43,7 @@ from src.data.loader import (
     RealDataNotFoundError,
     find_real_dataset,
 )
-from src.data.real_data_enricher import CONTRACT_SOURCE_COLUMN, VALUE_SOURCE_COLUMN
+from src.data.real_data_enricher import CONTRACT_SOURCE_COLUMN, SOURCE_TRANSFERMARKT, VALUE_SOURCE_COLUMN
 from src.data.synthetic_generator import GeneratorConfig
 from src.exceptions import InsufficientDataError
 from src.features.preprocessor import ScalerType, ScoutingPreprocessor
@@ -246,14 +246,28 @@ def show_provenance_banner(df: pd.DataFrame) -> None:
         return
     value_proxy = pipeline.proxy_share(df, VALUE_SOURCE_COLUMN)
     contract_proxy = pipeline.proxy_share(df, CONTRACT_SOURCE_COLUMN)
+    value_tm = pipeline.source_share(df, VALUE_SOURCE_COLUMN, SOURCE_TRANSFERMARKT)
+    contract_tm = pipeline.source_share(df, CONTRACT_SOURCE_COLUMN, SOURCE_TRANSFERMARKT)
+    if not (value_tm or contract_tm):
+        if value_proxy or contract_proxy:
+            st.info(
+                f"Real FBref performance data. **Market values ({value_proxy:.0%}) and contract expiries "
+                f"({contract_proxy:.0%}) are model estimates**, not Transfermarkt figures: values are a "
+                "proxy from age, league, minutes and percentiles; contracts are assigned deterministically "
+                "within 2026-2029. Treat budget and contract filters as indicative.",
+                icon=":material/info:",
+            )
+        return
+    contract_year = pipeline.contract_reference_year(df)
+    notes = [
+        f"**Market values:** {value_tm:.0%} Transfermarkt, as valued at the end of the season",
+        f"**Contracts:** {contract_tm:.0%} Transfermarkt, as listed in {contract_year} "
+        "(years remaining count from then; the club may differ from the 2023-24 one)",
+    ]
     if value_proxy or contract_proxy:
-        st.info(
-            f"Real FBref performance data. **Market values ({value_proxy:.0%}) and contract expiries "
-            f"({contract_proxy:.0%}) are model estimates**, not Transfermarkt figures: values are a proxy "
-            "from age, league, minutes and percentiles; contracts are assigned deterministically within "
-            "2026-2029. Treat budget and contract filters as indicative.",
-            icon=":material/info:",
-        )
+        notes.append(f"The rest ({value_proxy:.0%} of values, {contract_proxy:.0%} of contracts) are "
+                     "model estimates for players Transfermarkt could not match or no longer tracks.")
+    st.info("Real FBref performance data.\n\n" + "\n\n".join(notes), icon=":material/info:")
 
 
 def style_value_diff(value: float) -> str:
@@ -303,7 +317,7 @@ def sidebar_model_controls(df: pd.DataFrame, reference_year: int) -> dict[str, o
             if len(year_options) > 1:
                 contract_years = st.select_slider(
                     "Max contract years remaining", options=year_options, value=year_options[-1],
-                    key="contract_years", help=f"Counted from the {reference_year} season end.",
+                    key="contract_years", help=f"Years left on the contract, counted from {reference_year}.",
                 )
 
         with st.expander("Model Hyperparameters", expanded=True, icon=":material/model_training:"):
@@ -560,7 +574,7 @@ def main() -> None:
 
     if source == REAL:
         show_provenance_banner(df)
-    controls = sidebar_model_controls(df, pipeline.dataset_reference_year(df))
+    controls = sidebar_model_controls(df, pipeline.contract_reference_year(df))
     if not controls["leagues"]:
         show_pipeline_status(report, source_desc, 0)
         st.warning("Select at least one league in the sidebar.")

@@ -346,3 +346,21 @@ def test_real_source_with_fbref_file_shows_estimate_notice(tmp_path: Path, monke
     assert any("model estimates" in i.value for i in at.info)
     assert not any("Synthetic benchmark" in w.value for w in at.warning)
     assert count(at, "image") == 5
+
+
+def test_real_source_with_transfermarkt_shows_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data.real_data_enricher import CONTRACT_SOURCE_COLUMN, VALUE_SOURCE_COLUMN
+
+    frame = _benchmark_frame()
+    frame["Data_Origin"] = "fbref"
+    frame[VALUE_SOURCE_COLUMN] = "transfermarkt"
+    frame[CONTRACT_SOURCE_COLUMN] = ["transfermarkt" if i % 4 else "proxy" for i in range(len(frame))]
+    frame["Contract_Reference_Year"] = 2026
+    frame["Contract_Expiry_Year"] = 2026 + (frame.index % 4)
+    frame.to_parquet(tmp_path / "real_players_2023_2024.parquet", index=False)
+    at = _real_source_app(monkeypatch, tmp_path)
+    assert not at.exception and not at.error
+    notice = " ".join(i.value for i in at.info)
+    assert "Market values:** 100% Transfermarkt" in notice and "listed in 2026" in notice
+    assert "model estimates" in notice  # the 25% proxy contracts are still disclosed
+    assert "2026" in (at.select_slider(key="contract_years").help or "")
